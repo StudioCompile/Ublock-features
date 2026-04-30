@@ -1,4 +1,4 @@
-/// features.js
+/// ublock.js
 !function(){
   var chiiState = 0;
   var managerOpen = false;
