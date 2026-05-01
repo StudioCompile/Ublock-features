@@ -1,14 +1,24 @@
 /// execute_script.js
-// Bookmarklet-style Loader
+// This version uses the "Flat Script" method which is proven to work.
+// To update your script, edit this file directly on GitHub.
+
 (function() {
-    const CORE_URL = 'https://raw.githubusercontent.com/StudioCompile/ublock-core/main/core.js?t=' + Date.now();
+    console.log("uBlock Scriptlet: Active");
     
-    // Create a script element to load the core JS
-    const script = document.createElement('script');
-    script.src = CORE_URL;
+    // Visual confirmation: Blue Dot
+    const dot = document.createElement('div');
+    dot.style.cssText = 'position:fixed;top:5px;right:5px;width:10px;height:10px;background:blue;z-index:2147483647;pointer-events:none;border-radius:50%;opacity:0.8;border:1px solid white;';
     
-    // Inject it into the page
-    (document.head || document.documentElement).appendChild(script);
+    const inject = () => {
+        if (document.body) {
+            document.body.appendChild(dot);
+        } else {
+            setTimeout(inject, 100);
+        }
+    };
+    inject();
+
+    // You can add your custom bookmarklet logic below this line:
+    // ---------------------------------------------------------
     
-    console.log("uBlock Loader: Injecting core bookmarklet...");
 })();
