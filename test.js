@@ -13,19 +13,16 @@
 })();
 ">';
     Object.assign(el.style, {
-      position:      'fixed',
-      bottom:        '16px',
-      right:         '16px',
-      zIndex:        '2147483647',
-      background:    '#1a1a1a',
-      color:         '#fff',
-      padding:       '6px 12px',
-      borderRadius:  '6px',
-      fontFamily:    'sans-serif',
-      fontSize:      '14px',
-      pointerEvents: 'none',
+      display:      'block',
+      width:        '100%',
+      background:   '#1a1a1a',
+      color:        '#fff',
+      padding:      '10px 16px',
+      fontFamily:   'sans-serif',
+      fontSize:     '14px',
+      boxSizing:    'border-box',
     });
-    document.body.appendChild(el);
+    document.body.prepend(el);
   }
   function tryInject() {
     if (document.body) inject();
