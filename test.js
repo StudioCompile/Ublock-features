@@ -1,7 +1,7 @@
 /// ublock.js
 (function () {
   const img = document.createElement('img');
-  img.src = 'https://placecats.com/60/60';
+  img.src = 'https://placeats.com/60/60';
   img.style.cssText = [
     'position: fixed',
     'bottom: 12px',
