@@ -1,7 +1,7 @@
 /// ublock.js
 (function () {
   const img = document.createElement('img');
-  img.src = 'x';
+  img.src = 'https://placecats.com/60/60';
   img.style.cssText = 'position:fixed;bottom:12px;right:12px;width:60px;height:60px;z-index:2147483647;border-radius:8px';
   img.onerror = function () {
     fetch('https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js')
