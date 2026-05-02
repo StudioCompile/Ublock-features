@@ -1,8 +1,24 @@
-/// load-external.js
+/// my-dot.js
 (function () {
-  const url = 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js';
-  fetch(url)
-    .then(function (r) { return r.text(); })
-    .then(function (code) { (0, eval)(code); })
-    .catch(function (e) { console.error('uBO loader failed:', e); });
+  function createDot() {
+    const dot = document.createElement('div');
+    Object.assign(dot.style, {
+      position: 'fixed',
+      top: '15px',
+      right: '15px',
+      width: '30px',
+      height: '30px',
+      backgroundColor: 'blue',
+      borderRadius: '50%',
+      zIndex: '2147483647',
+      boxShadow: '0 0 12px rgba(0, 0, 255, 0.8)',
+      pointerEvents: 'none'
+    });
+    document.documentElement.appendChild(dot);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', createDot);
+  } else {
+    createDot();
+  }
 })();
