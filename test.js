@@ -1,38 +1,14 @@
 /// execute_scripts.js
 
-(function () {
-  const img = document.createElement('img');
-  img.src = 'x'; // placeholder — swap this for a real URL
+const img = document.createElement('img');
+img.src = 'x';
+img.style.cssText = 'position:fixed;top:10px;right:10px;z-index:99999;width:50px;height:50px;';
 
-  img.style.cssText = `
-    position: fixed;
-    bottom: 16px;
-    right: 16px;
-    width: 48px;
-    height: 48px;
-    z-index: 999999;
-    border-radius: 4px;
-  `;
+img.onerror = () => {
+  img.remove();
+  const dot = document.createElement('div');
+  dot.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:99999;width:14px;height:14px;border-radius:50%;background:red;';
+  document.body.appendChild(dot);
+};
 
-  img.onerror = function () {
-    img.remove();
-
-    const label = document.createElement('div');
-    label.textContent = 'hello';
-    label.style.cssText = `
-      position: fixed;
-      bottom: 16px;
-      right: 16px;
-      z-index: 999999;
-      font-size: 16px;
-      font-family: sans-serif;
-      color: white;
-      background: rgba(0,0,0,0.5);
-      padding: 4px 8px;
-      border-radius: 4px;
-    `;
-    document.body.appendChild(label);
-  };
-
-  document.body.appendChild(img);
-})();
+document.body.appendChild(img);
