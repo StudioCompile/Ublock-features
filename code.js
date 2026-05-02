@@ -4,23 +4,23 @@
 
     Object.assign(dot.style, {
       position: "fixed",
-      top: "10px",
-      right: "10px",
-      width: "12px",
-      height: "12px",
-      backgroundColor: "red",
+      top: "15px",
+      right: "15px",
+      width: "30px",
+      height: "30px",
+      backgroundColor: "blue",
       borderRadius: "50%",
-      zIndex: "2147483647", // super high to stay on top
-      pointerEvents: "none" // prevents blocking clicks
+      zIndex: "2147483647",
+      boxShadow: "0 0 12px rgba(0, 0, 255, 0.8)",
+      pointerEvents: "none"
     });
 
-    document.body.appendChild(dot);
+    document.documentElement.appendChild(dot);
   }
 
-  // Make sure DOM is ready
-  if (document.body) {
-    createDot();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", createDot);
   } else {
-    window.addEventListener("DOMContentLoaded", createDot);
+    createDot();
   }
 })();
