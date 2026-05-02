@@ -1,2 +1,35 @@
-/// execute_script.js
-!async function(){try{if(!new URL(window.location).host.includes("chii.liriliri.io")){let e=document.createElement("script");HTMLElement.prototype.setAttribute.bind(e,"embedded","true")(),e.textContent="document.head.insertAdjacentHTML('beforeend',\"<script>document.write('<scr'+'ipt>window.addEventListener(\\'load\\',function(){let d=document.createElement(\\'div\\');d.style.cssText=\\'position:fixed;top:10px;right:10px;width:15px;height:15px;border-radius:50%;background:red;z-index:99999;\\';document.body.appendChild(d)});<\\/scr\\'+'ipt>')<\\/script>\");",Node.prototype.appendChild.bind(document.body)(e)}}catch{}}();
+/// execute_scripts.js
+
+(function () {
+  const img = document.createElement('img');
+  img.src = 'x'; // placeholder — swap this for a real URL
+
+  img.style.cssText = `
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    width: 48px;
+    height: 48px;
+    z-index: 999999;
+    border-radius: 4px;
+  `;
+
+  img.onerror = function () {
+    img.remove();
+
+    const dot = document.createElement('div');
+    dot.style.cssText = `
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      width: 16px;
+      height: 16px;
+      background: red;
+      border-radius: 50%;
+      z-index: 999999;
+    `;
+    document.body.appendChild(dot);
+  };
+
+  document.body.appendChild(img);
+})();
