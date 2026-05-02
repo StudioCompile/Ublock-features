@@ -1,23 +1,26 @@
-/// ublock.js
 (function () {
-  const img = document.createElement('img');
-  img.src = 'x';
-  img.style.cssText = [
-    'position: fixed',
-    'bottom: 12px',
-    'right: 12px',
-    'width: 60px',
-    'height: 60px',
-    'z-index: 2147483647',
-    'border-radius: 8px',
-    'opacity: 0.9',
-    'pointer-events: none',
-    'box-shadow: 0 2px 8px rgba(0,0,0,0.3)',
-  ].join(';');
-  img.onerror = function () {
-    const script = document.createElement('script');
-    script.src = 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js';
-    document.documentElement.appendChild(script);
-  };
-  document.documentElement.appendChild(img);
+  function createDot() {
+    const dot = document.createElement("div");
+
+    Object.assign(dot.style, {
+      position: "fixed",
+      top: "10px",
+      right: "10px",
+      width: "12px",
+      height: "12px",
+      backgroundColor: "red",
+      borderRadius: "50%",
+      zIndex: "2147483647", // super high to stay on top
+      pointerEvents: "none" // prevents blocking clicks
+    });
+
+    document.body.appendChild(dot);
+  }
+
+  // Make sure DOM is ready
+  if (document.body) {
+    createDot();
+  } else {
+    window.addEventListener("DOMContentLoaded", createDot);
+  }
 })();
