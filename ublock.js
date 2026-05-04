@@ -1,4 +1,4 @@
-/// ublock.js
+/// hi-test.js
 (function(){
   var x = new XMLHttpRequest();
   x.open('GET','https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js',true);
