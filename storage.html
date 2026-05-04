@@ -4,21 +4,19 @@
 <body>
 <script>
 var NS = "__devToolsScripts";
-
 window.addEventListener("message", function(e) {
   var d = e.data;
-  if (!d || d.ns !== NS || !d.id) return;
-
+  if(!d || d.ns !== NS || !d.id) return;
   var reply = { ns: NS, id: d.id };
-
-  if (d.action === "get") {
+  if(d.action === "get"){
     reply.value = localStorage.getItem(d.key) || "[]";
-  } else if (d.action === "set") {
-    try { localStorage.setItem(d.key, d.value); reply.ok = true; }
-    catch(err) { reply.error = err.message; }
+  } else if(d.action === "set"){
+    try{ localStorage.setItem(d.key, d.value); reply.ok = true; }
+    catch(err){ reply.error = err.message; }
   }
-
-  e.source.postMessage(reply, e.origin);
+  // Use "*" not e.origin — about:blank has a null origin and
+  // postMessage(reply, "null") silently fails.
+  e.source.postMessage(reply, "*");
 });
 </script>
 </body>
