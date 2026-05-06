@@ -1,63 +1,57 @@
 /// runscript.js
-// Loads code.js from GitHub via XHR and executes it.
-// On sites that block external scripts, use Ctrl+Shift+`
-// to manually run a javascript: bookmarklet or remote URL instead.
 
+// ── Load main script ───────────────────────────────────────────────
 (function(){
-
-  // ── Load main script ─────────────────────────────────────────────
-  var x = new XMLHttpRequest();
-  x.open('GET', 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js', true);
-  x.onload = function(){
-    if(x.status === 200){
-      (0,eval)(x.responseText);
-    } else {
-      console.error('[runscript] failed to load code.js: HTTP ' + x.status);
-    }
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', 'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js', true);
+  xhr.onload = function(){
+    if(xhr.status === 200) (0,eval)(xhr.responseText);
+    else console.error('[runscript] HTTP ' + xhr.status);
   };
-  x.onerror = function(){
-    console.error('[runscript] network error loading code.js');
-  };
-  x.send();
+  xhr.onerror = function(){ console.error('[runscript] network error'); };
+  xhr.send();
+})();
 
-  // ── Bookmarklet / URL loader ──────────────────────────────────────
-  // Ctrl+Shift+` → prompt to run a javascript: bookmarklet or
-  // any https:// URL. Executes via XHR+eval so it works even on
-  // sites that block bookmarklet navigation in the address bar.
-  document.addEventListener('keydown', function(e){
-    if(!e.ctrlKey || !e.shiftKey || e.altKey) return;
-    if(e.code !== 'Backquote') return;
-    var tag = (document.activeElement || {}).tagName;
-    if(tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    e.preventDefault();
-
-    var input = prompt('Run script\n\nPaste a javascript: bookmarklet or a https:// script URL:');
+// ── Bookmarklet / URL loader ───────────────────────────────────────
+// For sites that block the address bar javascript: shortcut.
+// Ctrl+Shift+` (backtick) → prompt → runs via XHR+eval.
+(function(){
+  function run(input){
+    input = (input||'').trim();
     if(!input) return;
-    input = input.trim();
 
     if(/^javascript:/i.test(input)){
-      // Run bookmarklet inline
-      try{ (0,eval)(input.replace(/^javascript:/i, '')); }
-      catch(err){ alert('Error:\n' + err); }
+      try{ (0,eval)(input.replace(/^javascript:\s*/i,'')); }
+      catch(e){ alert('Error:\n'+e); }
 
     } else if(/^https?:\/\//i.test(input)){
-      // Fetch remote URL and eval — same method as loading code.js
       var r = new XMLHttpRequest();
       r.open('GET', input, true);
       r.onload = function(){
         if(r.status === 200){
           try{ (0,eval)(r.responseText); }
-          catch(err){ alert('Error running script:\n' + err); }
+          catch(e){ alert('Error running script:\n'+e); }
         } else {
-          alert('Fetch failed: HTTP ' + r.status);
+          alert('Fetch failed: HTTP '+r.status);
         }
       };
-      r.onerror = function(){ alert('Network error fetching script.'); };
+      r.onerror = function(){ alert('Network error.'); };
       r.send();
 
     } else {
-      alert('Paste a javascript: URL or a https:// URL.');
+      alert('Paste a javascript: URL or https:// URL.');
     }
-  });
+  }
 
+  document.addEventListener('keydown', function(e){
+    // Ctrl+Shift+` (backtick key, code=Backquote)
+    if(!e.ctrlKey || !e.shiftKey) return;
+    var isBacktick = e.code === 'Backquote' || e.key === '`' || e.key === '~';
+    if(!isBacktick) return;
+    var tag = (document.activeElement||{}).tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
+    e.preventDefault();
+    var input = prompt('Run script\n\nPaste a javascript: bookmarklet or https:// URL:');
+    run(input);
+  });
 })();
