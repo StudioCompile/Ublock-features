@@ -472,7 +472,7 @@
       if(typing) return;
       e.preventDefault(); injectChii(); return;
     }
-    if(e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "`" || e.key === "~")){
+    if(e.ctrlKey && !e.altKey && e.code === "Backquote"){
       e.preventDefault(); openManager(); return;
     }
     if(e.ctrlKey && !e.shiftKey && !e.altKey && e.key === "v"){
