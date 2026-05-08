@@ -1,9 +1,3 @@
-<!DOCTYPE html>
-<html>
-<head>
-<title>Page Title</title>
-</head>
-<script>
 (0,eval)((function(){/*!
 !function(){
 
@@ -384,12 +378,3 @@
 
 }();
 */}).toString().slice(16,-3))
-</script>
-<body>
-
-<h1>My First Heading</h1>
-<p>My first paragraph.</p>
-
-</body>
-</html>
-
