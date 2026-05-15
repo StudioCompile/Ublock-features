@@ -1,58 +1,19 @@
-// ==UserScript==
-// @name         Remote Script Loader (No Eval)
-// @namespace    https://example.com/
-// @version      2.0
-// @description  Loads external JavaScript safely using a script element
-// @match        *://*/*
-// @grant        GM_xmlhttpRequest
-// @connect      raw.githubusercontent.com
-// @run-at       document-start
-// ==/UserScript==
-
-(function () {
-    'use strict';
-
-    const SCRIPT_URL =
-        'https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js';
-
-    function injectScript(code) {
-        try {
-            const script = document.createElement('script');
-
-            script.textContent = code;
-            script.setAttribute('data-userscript-loader', 'true');
-
-            (document.head || document.documentElement).appendChild(script);
-
-            script.remove();
-
-            console.log('[Loader] Script injected successfully');
-        } catch (err) {
-            console.error('[Loader] Injection failed:', err);
-        }
+/// runscript.js
+(function(){
+  var x = new XMLHttpRequest();
+  x.open('GET','https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/code.js',true);
+  x.onload = function(){
+    if(x.status === 200){
+      var s = document.createElement('script');
+      s.textContent = x.responseText;
+      document.documentElement.appendChild(s);
+      s.remove();
     }
-
-    GM_xmlhttpRequest({
-        method: 'GET',
-        url: SCRIPT_URL,
-
-        onload(response) {
-            if (response.status >= 200 && response.status < 300) {
-                injectScript(response.responseText);
-            } else {
-                console.error(
-                    '[Loader] Failed to fetch script:',
-                    response.status
-                );
-            }
-        },
-
-        onerror(err) {
-            console.error('[Loader] Network error:', err);
-        },
-
-        ontimeout() {
-            console.error('[Loader] Request timed out');
-        }
-    });
+  };
+  x.onerror = function(){
+    console.error('xhr failed');
+  };
+  x.send();
 })();
+
+*##+js(runscript)
