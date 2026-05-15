@@ -1,0 +1,8 @@
+/// myloader.js
+(function(){
+  var s = document.createElement('style');
+  s.textContent = 'body::before{content:"";position:fixed;top:10px;left:10px;width:20px;height:20px;background:red;border-radius:50%;z-index:999999;}';
+  document.documentElement.appendChild(s);
+})();
+
+*##+js(myloader)
