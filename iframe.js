@@ -30,22 +30,27 @@
     // Chrome error pages are at chrome-error:// — readable from host.
     // Cross-origin successful loads throw SecurityError — we ignore those (they're fine).
     function checkAfterLoad(frame) {
-      // Skip frames we just set to srcdoc (blocked page) — they fire load too
       if (frame.__ifmIsBlockedPage) return;
 
       let href = '';
       try {
         href = frame.contentWindow.location.href;
       } catch {
-        // SecurityError = cross-origin page loaded successfully. Do nothing.
+        // SecurityError = real cross-origin page loaded fine. Do nothing.
         return;
       }
 
       let blocked = false;
+      // Chrome puts X-Frame-Options blocked pages at chrome-error://
       if (href.startsWith('chrome-error://') || href.startsWith('chrome://')) {
         blocked = true;
-      } else {
-        // Same-origin error page (e.g. about:blank after ERR_)
+      }
+      // about:blank can appear after ERR_ network errors
+      if (!blocked && (href === 'about:blank' || href === '') && frame.__ifmPendingUrl) {
+        blocked = true;
+      }
+      // Same-origin Chrome error page DOM marker
+      if (!blocked) {
         try {
           const doc = frame.contentDocument;
           if (doc && doc.getElementById('main-frame-error')) blocked = true;
@@ -53,7 +58,6 @@
       }
 
       if (blocked) {
-        // The URL we tried to load is stored in __ifmPendingUrl
         const attempted = frame.__ifmPendingUrl || href;
         showBlockedPage(frame, attempted);
       }
@@ -109,6 +113,10 @@
       frame.__ifmIsBlockedPage = false;
       frame.removeAttribute('srcdoc');
       frame.src = url;
+      // Send nav state once the new page has loaded and its script has run
+      frame.addEventListener('load', () => {
+        setTimeout(() => sendNavState(frame), 100);
+      }, { once: true });
     }
 
     // Handle messages from iframe side
@@ -159,7 +167,16 @@
 
       if (e.data.type === '__ifm_currenturl') {
         if (!frame) return;
-        frame.__ifmPendingUrl = e.data.url;
+        const newUrl = e.data.url;
+        const old = frame.__ifmPendingUrl;
+        // Track same-domain directory changes in history
+        if (old && old !== newUrl && !old.startsWith('data:') && old !== 'about:blank') {
+          if (!frame.__ifmHist) frame.__ifmHist = [];
+          if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
+          frame.__ifmHist.push(old);
+          frame.__ifmFwd = [];
+        }
+        frame.__ifmPendingUrl = newUrl;
         sendNavState(frame);
       }
     });
@@ -312,7 +329,7 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
 #__ufb .__ub[disabled]{color:#d0d0d0;cursor:default;pointer-events:none}
 #__ufb .__ub svg{width:12px;height:12px;display:block}
 #__ufb .__ui{all:unset;height:28px;padding:0 7px;font-size:11px;color:#202124;
-  width:200px;border-right:1px solid #f1f3f4;cursor:text;
+  width:200px;border-left:1px solid #dadce0;border-right:1px solid #f1f3f4;cursor:text;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #__ufb .__ui:focus{background:#f8f9fa}
 #__ufb .__ui::placeholder{color:#9aa0a6}
@@ -398,20 +415,23 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
     urlInput.blur();
   }
 
-  // Corner trigger — also hide when mouse moves OUT of corner zone
+  // Corner trigger
   let _ht = null;
+  let _barHovered = false;
+  const _hide = () => { _ht = setTimeout(() => bar.classList.remove('show'), 220); };
+  const _show = () => { clearTimeout(_ht); bar.classList.add('show'); };
+
   document.addEventListener('mousemove', e => {
     const inCorner = window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H;
-    if (inCorner) {
+    if (inCorner || _barHovered) {
+      _show();
+    } else {
       clearTimeout(_ht);
-      bar.classList.add('show');
-    } else if (!bar.matches(':hover')) {
-      clearTimeout(_ht);
-      _ht = setTimeout(() => bar.classList.remove('show'), 300);
+      _hide();
     }
   }, { passive: true });
-  bar.addEventListener('mouseenter', () => { clearTimeout(_ht); bar.classList.add('show'); });
-  bar.addEventListener('mouseleave', () => { _ht = setTimeout(() => bar.classList.remove('show'), 300); });
-  document.addEventListener('mouseleave', () => { _ht = setTimeout(() => bar.classList.remove('show'), 300); });
+  bar.addEventListener('mouseenter', () => { _barHovered = true;  _show(); });
+  bar.addEventListener('mouseleave', () => { _barHovered = false; _hide(); });
+  document.addEventListener('mouseleave', () => { _barHovered = false; _hide(); });
 
 })();
