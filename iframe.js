@@ -139,16 +139,16 @@
 
     function injectBlockedPage(frame, blockedUrl) {
       const safeUrl = escHtml(blockedUrl || '');
-      frame.__ifmLastBlockedUrl = blockedUrl;
-      // Push to back stack
+      // Push previous real URL to back stack
       if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
-      const prev = frame.__ifmPendingUrl || frame.getAttribute('src') || '';
-      if (prev && prev !== blockedUrl && prev !== 'about:srcdoc' && !prev.startsWith('data:')) {
+      const prev = frame.__ifmPendingUrl || '';
+      if (prev && prev !== blockedUrl && !prev.startsWith('data:') && prev !== 'about:blank') {
         frame.__ifmBackStack.push(prev);
       }
-
+      frame.__ifmSuppressObs = true;
       frame.removeAttribute('src');
       frame.srcdoc = buildBlockedPage(safeUrl);
+      setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
     }
 
     function buildBlockedPage(safeUrl) {
