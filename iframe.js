@@ -93,52 +93,74 @@
 
     document.querySelectorAll('iframe').forEach(watchFrame);
 
+    function sendNavState(frame) {
+      try {
+        frame.contentWindow.postMessage({
+          type: '__ifm_navstate',
+          canBack: (frame.__ifmHist || []).length > 0,
+          canFwd:  (frame.__ifmFwd  || []).length > 0,
+          url:     frame.__ifmPendingUrl || '',
+        }, '*');
+      } catch {}
+    }
+
+    function doFrameNav(frame, url) {
+      frame.__ifmPendingUrl = url;
+      frame.__ifmIsBlockedPage = false;
+      frame.removeAttribute('srcdoc');
+      frame.src = url;
+    }
+
     // Handle messages from iframe side
     window.addEventListener('message', e => {
       if (!e.data || typeof e.data !== 'object') return;
       const frame = findFrameByWindow(e.source);
 
-      // Iframe intercepted a link click — navigate the frame
       if (e.data.type === '__ifm_navigate') {
         if (!frame) return;
         const url = e.data.url;
-        frame.__ifmPendingUrl = url;
-        frame.__ifmIsBlockedPage = false;
-        frame.removeAttribute('srcdoc');
-        frame.src = url;
+        const old = frame.__ifmPendingUrl;
+        if (!frame.__ifmHist) frame.__ifmHist = [];
+        if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
+        if (old && !old.startsWith('data:') && old !== 'about:blank') frame.__ifmHist.push(old);
+        frame.__ifmFwd = [];
+        doFrameNav(frame, url);
       }
 
-      // Blocked page "Back" button
       if (e.data.type === '__ifm_goback') {
         if (!frame) return;
-        const prev = frame.__ifmPrevUrl;
-        if (prev) {
-          frame.__ifmPendingUrl = prev;
-          frame.__ifmIsBlockedPage = false;
-          frame.removeAttribute('srcdoc');
-          frame.src = prev;
-        }
+        if (!frame.__ifmHist) frame.__ifmHist = [];
+        if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
+        const prev = frame.__ifmHist.pop();
+        if (!prev) return;
+        const cur = frame.__ifmPendingUrl;
+        if (cur && !cur.startsWith('data:')) frame.__ifmFwd.unshift(cur);
+        doFrameNav(frame, prev);
+        sendNavState(frame);
       }
 
-      // Blocked page "Try again"
+      if (e.data.type === '__ifm_goforward') {
+        if (!frame) return;
+        if (!frame.__ifmHist) frame.__ifmHist = [];
+        if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
+        const next = frame.__ifmFwd.shift();
+        if (!next) return;
+        const cur = frame.__ifmPendingUrl;
+        if (cur && !cur.startsWith('data:')) frame.__ifmHist.push(cur);
+        doFrameNav(frame, next);
+        sendNavState(frame);
+      }
+
       if (e.data.type === '__ifm_retry') {
         if (!frame) return;
         const url = frame.__ifmBlockedUrl || e.data.url;
-        if (url) {
-          frame.__ifmPendingUrl = url;
-          frame.__ifmIsBlockedPage = false;
-          frame.removeAttribute('srcdoc');
-          frame.src = url;
-        }
+        if (url) doFrameNav(frame, url);
       }
 
-      // Iframe reports its current URL (for src attribute tracking only — no navigation)
       if (e.data.type === '__ifm_currenturl') {
         if (!frame) return;
-        // Store as a data property — do NOT setAttribute (that would navigate)
-        frame.__ifmCurrentUrl = e.data.url;
-        frame.__ifmPrevUrl = frame.__ifmPendingUrl || frame.__ifmCurrentUrl;
         frame.__ifmPendingUrl = e.data.url;
+        sendNavState(frame);
       }
     });
 
@@ -199,14 +221,12 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
   /* ════════════════════════════════════════════════════════
      IFRAME SIDE
      - Intercepts link clicks (same frame unless Ctrl)
-     - Tracks history internally
+     - History lives on HOST (survives page reloads)
      - Bottom-right corner bar: back, fwd, url input, google
      - Reports current URL to host (metadata only)
   ════════════════════════════════════════════════════════ */
 
-  const _hist = [];
-  const _fwd  = [];
-  let   _cur  = location.href;
+  let _cur = location.href;
 
   function sendToHost(msg) {
     try { window.top.postMessage(msg, '*'); } catch {}
@@ -220,15 +240,12 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
     sendToHost({ type: '__ifm_currenturl', url });
   }
 
-  // Called whenever we successfully land on a new URL inside this iframe
+  // SPA navigations — just report, history managed by host
   function onNavigated(url) {
     if (!url || url === _cur) return;
     if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) return;
-    _hist.push(_cur);
-    _fwd.length = 0;
     _cur = url;
     reportUrl(_cur);
-    renderBar();
   }
 
   /* ── Intercept link clicks ── */
@@ -322,6 +339,13 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
   btnFwd.disabled = true;
   btnFwd.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
+  // Google button — before URL input so it's clear it navigates to Google, not searches input
+  const btnGoogle = document.createElement('button');
+  btnGoogle.className = '__ugl';
+  btnGoogle.title = 'Go to Google';
+  // Coloured G logo
+  btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>`;
+
   const urlInput = document.createElement('input');
   urlInput.className = '__ui';
   urlInput.type = 'text';
@@ -330,42 +354,29 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
   urlInput.placeholder = 'Enter URL or javascript:…';
   urlInput.value = _cur;
 
-  const btnGoogle = document.createElement('button');
-  btnGoogle.className = '__ugl';
-  btnGoogle.title = 'Google';
-  btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-3.5-3.5"/></svg>`;
-
+  // Order: back, fwd, google, url
   bar.appendChild(btnBack);
   bar.appendChild(btnFwd);
-  bar.appendChild(urlInput);
   bar.appendChild(btnGoogle);
+  bar.appendChild(urlInput);
   document.body.appendChild(bar);
 
-  function renderBar() {
-    btnBack.disabled = _hist.length === 0;
-    btnFwd.disabled  = _fwd.length  === 0;
-    if (document.activeElement !== urlInput) urlInput.value = _cur;
+  function renderBar(canBack, canFwd) {
+    btnBack.disabled = !canBack;
+    btnFwd.disabled  = !canFwd;
   }
 
+  // Listen for nav state updates from host
+  window.addEventListener('message', e => {
+    if (!e.data || e.data.type !== '__ifm_navstate') return;
+    renderBar(e.data.canBack, e.data.canFwd);
+    _cur = e.data.url || _cur;
+    if (document.activeElement !== urlInput) urlInput.value = _cur;
+  });
+
   // Events
-  btnBack.addEventListener('click', () => {
-    if (!_hist.length) return;
-    const prev = _hist.pop();
-    _fwd.unshift(_cur);
-    _cur = prev;
-    renderBar();
-    requestNav(_cur);
-  });
-
-  btnFwd.addEventListener('click', () => {
-    if (!_fwd.length) return;
-    const next = _fwd.shift();
-    _hist.push(_cur);
-    _cur = next;
-    renderBar();
-    requestNav(_cur);
-  });
-
+  btnBack.addEventListener('click', () => sendToHost({ type: '__ifm_goback' }));
+  btnFwd.addEventListener('click',  () => sendToHost({ type: '__ifm_goforward' }));
   btnGoogle.addEventListener('click', () => requestNav('https://www.google.com/?igu=1'));
 
   urlInput.addEventListener('focus', () => urlInput.select());
@@ -387,12 +398,16 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
     urlInput.blur();
   }
 
-  // Corner trigger
+  // Corner trigger — also hide when mouse moves OUT of corner zone
   let _ht = null;
   document.addEventListener('mousemove', e => {
-    if (window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H) {
+    const inCorner = window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H;
+    if (inCorner) {
       clearTimeout(_ht);
       bar.classList.add('show');
+    } else if (!bar.matches(':hover')) {
+      clearTimeout(_ht);
+      _ht = setTimeout(() => bar.classList.remove('show'), 300);
     }
   }, { passive: true });
   bar.addEventListener('mouseenter', () => { clearTimeout(_ht); bar.classList.add('show'); });
