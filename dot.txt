@@ -1,2 +1,0 @@
-*##body:style(position:relative !important)
-*##body:before:style(content:"" !important;position:fixed !important;top:10px !important;left:10px !important;width:20px !important;height:20px !important;background:red !important;border-radius:50% !important;z-index:999999 !important;display:block !important)
