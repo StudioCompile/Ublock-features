@@ -11,8 +11,11 @@
   }
 
   /* ════════════════════════════════════════════════════════
-     HOST PAGE — error detection & blocked page injection
-     The bar/UI lives inside the iframe, not here.
+     HOST PAGE
+     Only job: watch iframes for Chrome error pages after load
+     and replace with custom blocked page via srcdoc.
+     Does NOT intercept src changes (that caused the reload loop).
+     Navigation is driven entirely by postMessage from iframe side.
   ════════════════════════════════════════════════════════ */
   if (!IS_IFRAME) {
 
@@ -23,287 +26,209 @@
       return null;
     }
 
-    // Called after an iframe loads — checks if Chrome navigated
-    // to a blocked/error chrome:// URL we can't inject into
-    function checkFrameAfterLoad(frame) {
+    // After a frame loads, check if Chrome landed on an error page.
+    // Chrome error pages are at chrome-error:// — readable from host.
+    // Cross-origin successful loads throw SecurityError — we ignore those (they're fine).
+    function checkAfterLoad(frame) {
+      // Skip frames we just set to srcdoc (blocked page) — they fire load too
+      if (frame.__ifmIsBlockedPage) return;
+
       let href = '';
       try {
         href = frame.contentWindow.location.href;
       } catch {
-        // Cross-origin but loaded fine — do nothing
+        // SecurityError = cross-origin page loaded successfully. Do nothing.
         return;
       }
 
-      // Chrome error pages land on chrome-error:// or about:blank after a block
-      // We also check for the #main-frame-error element on same-origin error pages
-      let isBlocked = false;
-      let doc = null;
-      try { doc = frame.contentDocument; } catch {}
-
+      let blocked = false;
       if (href.startsWith('chrome-error://') || href.startsWith('chrome://')) {
-        isBlocked = true;
-      } else if (doc && doc.getElementById('main-frame-error')) {
-        isBlocked = true;
+        blocked = true;
+      } else {
+        // Same-origin error page (e.g. about:blank after ERR_)
+        try {
+          const doc = frame.contentDocument;
+          if (doc && doc.getElementById('main-frame-error')) blocked = true;
+        } catch {}
       }
 
-      if (isBlocked) {
-        const attempted = frame.__ifmPendingUrl || frame.getAttribute('src') || href;
-        injectBlockedPage(frame, attempted);
+      if (blocked) {
+        // The URL we tried to load is stored in __ifmPendingUrl
+        const attempted = frame.__ifmPendingUrl || href;
+        showBlockedPage(frame, attempted);
       }
+    }
+
+    function showBlockedPage(frame, url) {
+      const safe = escHtml(url);
+      // Save url so back button can use it to retry
+      frame.__ifmBlockedUrl = url;
+      frame.__ifmIsBlockedPage = true;
+      frame.srcdoc = buildBlockedPage(safe);
+      // srcdoc fires a load event — after that clear the flag so future real loads check normally
+      frame.addEventListener('load', () => {
+        // keep __ifmIsBlockedPage true while the blocked page is showing
+        // it gets cleared when we navigate away
+      }, { once: true });
     }
 
     function watchFrame(frame) {
-      if (frame.__ifmHostWatched) return;
-      frame.__ifmHostWatched = true;
-      frame.addEventListener('load', () => {
-        setTimeout(() => checkFrameAfterLoad(frame), 60);
-      });
+      if (frame.__ifmWatched) return;
+      frame.__ifmWatched = true;
+      // Track src so we know what was attempted
+      const initialSrc = frame.getAttribute('src');
+      if (initialSrc) frame.__ifmPendingUrl = initialSrc;
+
+      frame.addEventListener('load', () => setTimeout(() => checkAfterLoad(frame), 50));
     }
 
-    // Watch src attribute changes to track pending URL
-    // __ifmSuppressObs is set to true when WE set the src to avoid re-triggering
-    const srcObs = new MutationObserver(muts => {
-      for (const m of muts) {
-        if (m.type !== 'attributes' || m.target.tagName !== 'IFRAME') continue;
-        if (m.target.__ifmSuppressObs) continue;
-        const src = m.target.getAttribute('src');
-        if (src && src !== 'about:blank') {
-          m.target.__ifmPendingUrl = src;
-        }
-      }
-    });
-    srcObs.observe(document.documentElement, {
-      attributes: true, attributeFilter: ['src'], subtree: true
-    });
-
-    function setSrc(frame, url) {
-      frame.__ifmSuppressObs = true;
-      frame.__ifmPendingUrl = url;
-      frame.removeAttribute('srcdoc');
-      frame.src = url;
-      // Allow one tick for the mutation to fire then re-enable
-      setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
-    }
-
-    // Watch for new iframes
-    const domObs = new MutationObserver(muts => {
+    // Watch for iframes added to DOM
+    new MutationObserver(muts => {
       for (const m of muts) m.addedNodes.forEach(n => {
         if (n.nodeType !== 1) return;
         if (n.tagName === 'IFRAME') watchFrame(n);
-        n.querySelectorAll && n.querySelectorAll('iframe').forEach(watchFrame);
+        if (n.querySelectorAll) n.querySelectorAll('iframe').forEach(watchFrame);
       });
-    });
-    domObs.observe(document.documentElement, { childList: true, subtree: true });
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
     document.querySelectorAll('iframe').forEach(watchFrame);
 
-    // Messages from inside the iframe
+    // Handle messages from iframe side
     window.addEventListener('message', e => {
       if (!e.data || typeof e.data !== 'object') return;
+      const frame = findFrameByWindow(e.source);
 
-      // iframe requests navigation (link click intercepted inside)
+      // Iframe intercepted a link click — navigate the frame
       if (e.data.type === '__ifm_navigate') {
-        const frame = findFrameByWindow(e.source);
         if (!frame) return;
-        setSrc(frame, e.data.url);
+        const url = e.data.url;
+        frame.__ifmPendingUrl = url;
+        frame.__ifmIsBlockedPage = false;
+        frame.removeAttribute('srcdoc');
+        frame.src = url;
       }
 
-      // Go back from blocked page
+      // Blocked page "Back" button
       if (e.data.type === '__ifm_goback') {
-        const frame = findFrameByWindow(e.source);
         if (!frame) return;
-        const hist = frame.__ifmBackStack || [];
-        const prev = hist.pop();
-        frame.__ifmBackStack = hist;
-        if (prev && !prev.startsWith('data:')) {
-          setSrc(frame, prev);
+        const prev = frame.__ifmPrevUrl;
+        if (prev) {
+          frame.__ifmPendingUrl = prev;
+          frame.__ifmIsBlockedPage = false;
+          frame.removeAttribute('srcdoc');
+          frame.src = prev;
         }
       }
 
-      // iframe telling us its current real URL (for src tracking on SPA navigations)
-      if (e.data.type === '__ifm_seturl') {
-        const frame = findFrameByWindow(e.source);
+      // Blocked page "Try again"
+      if (e.data.type === '__ifm_retry') {
         if (!frame) return;
-        const old = frame.__ifmPendingUrl;
-        const newUrl = e.data.url;
-        if (old && old !== 'about:blank' && old !== newUrl) {
-          if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
-          frame.__ifmBackStack.push(old);
+        const url = frame.__ifmBlockedUrl || e.data.url;
+        if (url) {
+          frame.__ifmPendingUrl = url;
+          frame.__ifmIsBlockedPage = false;
+          frame.removeAttribute('srcdoc');
+          frame.src = url;
         }
-        // Update src attr visibly for host page observers without re-triggering srcObs
-        frame.__ifmSuppressObs = true;
-        frame.setAttribute('src', newUrl);
-        setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
-        frame.__ifmPendingUrl = newUrl;
+      }
+
+      // Iframe reports its current URL (for src attribute tracking only — no navigation)
+      if (e.data.type === '__ifm_currenturl') {
+        if (!frame) return;
+        // Store as a data property — do NOT setAttribute (that would navigate)
+        frame.__ifmCurrentUrl = e.data.url;
+        frame.__ifmPrevUrl = frame.__ifmPendingUrl || frame.__ifmCurrentUrl;
+        frame.__ifmPendingUrl = e.data.url;
       }
     });
-
-    function injectBlockedPage(frame, blockedUrl) {
-      const safeUrl = escHtml(blockedUrl || '');
-      // Push previous real URL to back stack
-      if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
-      const prev = frame.__ifmPendingUrl || '';
-      if (prev && prev !== blockedUrl && !prev.startsWith('data:') && prev !== 'about:blank') {
-        frame.__ifmBackStack.push(prev);
-      }
-      frame.__ifmSuppressObs = true;
-      frame.removeAttribute('src');
-      frame.srcdoc = buildBlockedPage(safeUrl);
-      setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
-    }
 
     function buildBlockedPage(safeUrl) {
       return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
+<html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>This site can't be reached</title>
+<title>This site can\u2019t be reached</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
-    background: #fff;
-    color: #202124;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    padding: 40px 20px;
-    gap: 0;
-  }
-  .branding {
-    position: fixed;
-    bottom: 16px;
-    right: 16px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    opacity: 0.45;
-  }
-  .branding img { width: 18px; height: 18px; border-radius: 4px; }
-  .branding span { font-size: 11px; color: #777; font-weight: 500; letter-spacing: .02em; }
-  .icon-wrap {
-    width: 72px; height: 72px;
-    background: #f1f3f4;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    margin-bottom: 24px;
-  }
-  .icon-wrap svg { width: 36px; height: 36px; color: #80868b; }
-  h1 {
-    font-size: 22px;
-    font-weight: 400;
-    color: #202124;
-    margin-bottom: 8px;
-    text-align: center;
-  }
-  .url-line {
-    font-size: 12px;
-    color: #5f6368;
-    margin-bottom: 28px;
-    text-align: center;
-    max-width: 420px;
-    word-break: break-all;
-  }
-  .msg {
-    font-size: 13px;
-    color: #5f6368;
-    max-width: 420px;
-    text-align: center;
-    line-height: 1.6;
-    margin-bottom: 32px;
-  }
-  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-  .btn {
-    font-size: 13px;
-    font-weight: 500;
-    border: none;
-    border-radius: 4px;
-    padding: 9px 20px;
-    cursor: pointer;
-    transition: box-shadow .15s, background .15s;
-  }
-  .btn-primary {
-    background: #1a73e8;
-    color: #fff;
-  }
-  .btn-primary:hover { background: #1765cc; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
-  .btn-secondary {
-    background: #f1f3f4;
-    color: #202124;
-  }
-  .btn-secondary:hover { background: #e8eaed; }
-  .error-code {
-    margin-top: 40px;
-    font-size: 11px;
-    color: #bdc1c6;
-    letter-spacing: .03em;
-  }
-</style>
-</head>
-<body>
-  <div class="icon-wrap">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10"/>
-      <line x1="12" y1="8" x2="12" y2="12"/>
-      <line x1="12" y1="16" x2="12.01" y2="16" stroke-width="2.5"/>
-    </svg>
-  </div>
-  <h1>This site can't be reached</h1>
-  <div class="url-line">${safeUrl}</div>
-  <div class="msg">
-    This site refused to connect or has blocked embedding in frames.<br>
-    ERR_BLOCKED_BY_RESPONSE
-  </div>
-  <div class="btn-row">
-    <button class="btn btn-secondary" onclick="window.parent.postMessage({type:'__ifm_goback'},'*')">Back</button>
-    <button class="btn btn-primary" onclick="window.parent.postMessage({type:'__ifm_navigate',url:'${safeUrl}'},'*')">Try again</button>
-  </div>
-  <div class="error-code">uFeatures Embedded Browser</div>
-  <div class="branding">
-    <img src="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png" alt="">
-    <span>uFeatures</span>
-  </div>
-</body>
-</html>`;
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#fff;
+  color:#202124;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;min-height:100vh;padding:40px 20px}
+.icon{width:72px;height:72px;background:#f1f3f4;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;margin-bottom:24px}
+.icon svg{width:36px;height:36px;stroke:#80868b;fill:none;stroke-width:1.5;
+  stroke-linecap:round;stroke-linejoin:round}
+h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
+.url{font-size:12px;color:#5f6368;margin-bottom:24px;text-align:center;
+  max-width:420px;word-break:break-all}
+.msg{font-size:13px;color:#5f6368;max-width:420px;text-align:center;
+  line-height:1.6;margin-bottom:32px}
+.btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.btn{font-size:13px;font-weight:500;border:none;border-radius:4px;
+  padding:9px 20px;cursor:pointer;transition:box-shadow .15s,background .15s}
+.back{background:#f1f3f4;color:#202124}
+.back:hover{background:#e8eaed}
+.retry{background:#1a73e8;color:#fff}
+.retry:hover{background:#1765cc;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.brand{position:fixed;bottom:14px;right:14px;display:flex;align-items:center;
+  gap:5px;opacity:.4}
+.brand img{width:16px;height:16px;border-radius:3px}
+.brand span{font-size:11px;color:#777;font-weight:500}
+</style></head><body>
+<div class="icon"><svg viewBox="0 0 24 24">
+  <circle cx="12" cy="12" r="10"/>
+  <line x1="12" y1="8" x2="12" y2="12"/>
+  <line x1="12" y1="16" x2="12.01" y2="16" stroke-width="2.5"/>
+</svg></div>
+<h1>This site can\u2019t be reached</h1>
+<div class="url">${safeUrl}</div>
+<div class="msg">This site refused to connect or has blocked embedding.<br>
+<span style="font-size:11px;font-family:monospace;color:#bbb">ERR_BLOCKED_BY_RESPONSE</span></div>
+<div class="btns">
+  <button class="btn back" onclick="window.parent.postMessage({type:'__ifm_goback'},'*')">Back</button>
+  <button class="btn retry" onclick="window.parent.postMessage({type:'__ifm_retry',url:'${safeUrl}'},'*')">Try again</button>
+</div>
+<div class="brand">
+  <img src="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png" alt="">
+  <span>uFeatures</span>
+</div>
+</body></html>`;
     }
 
-    return; // host page done
+    return; // host page done — no UI here
   }
 
   /* ════════════════════════════════════════════════════════
      IFRAME SIDE
-     - Bottom-right corner bar (thin, chrome-style)
-     - Intercepts all link clicks → same iframe or new tab (Ctrl)
-     - Back / Forward stacks
-     - URL input: navigate on Enter, supports bookmarklets
-     - Google button
-     - Broadcasts URL changes to host
+     - Intercepts link clicks (same frame unless Ctrl)
+     - Tracks history internally
+     - Bottom-right corner bar: back, fwd, url input, google
+     - Reports current URL to host (metadata only)
   ════════════════════════════════════════════════════════ */
 
-  /* ── History state (per iframe instance) ── */
-  const _hist = [];   // back stack  (URLs already visited)
-  const _fwd  = [];   // forward stack
+  const _hist = [];
+  const _fwd  = [];
   let   _cur  = location.href;
 
-  function pushHistory(url) {
+  function sendToHost(msg) {
+    try { window.top.postMessage(msg, '*'); } catch {}
+  }
+
+  function requestNav(url) {
+    sendToHost({ type: '__ifm_navigate', url });
+  }
+
+  function reportUrl(url) {
+    sendToHost({ type: '__ifm_currenturl', url });
+  }
+
+  // Called whenever we successfully land on a new URL inside this iframe
+  function onNavigated(url) {
     if (!url || url === _cur) return;
-    // Don't push srcdoc/blob/data URLs
     if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) return;
     _hist.push(_cur);
     _fwd.length = 0;
     _cur = url;
-    tellHost(_cur);
-    updateBar();
-  }
-
-  function tellHost(url) {
-    try { window.top.postMessage({ type: '__ifm_seturl', url }, '*'); } catch {}
-  }
-
-  function requestNav(url) {
-    try { window.top.postMessage({ type: '__ifm_navigate', url }, '*'); } catch {}
+    reportUrl(_cur);
+    renderBar();
   }
 
   /* ── Intercept link clicks ── */
@@ -311,12 +236,12 @@
     const a = e.composedPath().find(n => n && n.tagName === 'A');
     if (!a) return;
     const href = a.getAttribute('href');
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-
-    // Ctrl/Meta = open in new tab (normal behaviour)
+    if (!href || href.startsWith('#')) return;
+    // Bookmarklets: let doGo handle them, not link clicks
+    if (href.startsWith('javascript:')) return;
+    // Ctrl/Meta = new tab
     if (e.ctrlKey || e.metaKey) return;
-
-    // Otherwise intercept and navigate in same iframe
+    // Force same-frame
     e.preventDefault();
     e.stopPropagation();
     let resolved;
@@ -324,248 +249,154 @@
     requestNav(resolved);
   }, true);
 
-  // Force all target=_blank to open in same iframe unless Ctrl held
+  // Neutralise target=_blank unless Ctrl held
   document.addEventListener('click', e => {
     const a = e.composedPath().find(n => n && n.tagName === 'A');
-    if (!a || !a.target || a.target === '_self') return;
-    if (!e.ctrlKey && !e.metaKey) {
-      a.target = '_self';
-    }
+    if (a && a.target === '_blank' && !e.ctrlKey && !e.metaKey) a.target = '_self';
   }, true);
 
-  /* ── SPA navigation ── */
-  const _wrapHistory = orig => function (...args) {
-    const r = orig.apply(this, args);
-    setTimeout(() => {
-      if (location.href !== _cur) pushHistory(location.href);
-    }, 0);
-    return r;
-  };
-  history.pushState    = _wrapHistory(history.pushState);
-  history.replaceState = _wrapHistory(history.replaceState);
+  /* ── SPA navigation hooks ── */
+  ['pushState','replaceState'].forEach(name => {
+    const orig = history[name];
+    history[name] = function(...args) {
+      const r = orig.apply(this, args);
+      setTimeout(() => { if (location.href !== _cur) onNavigated(location.href); }, 0);
+      return r;
+    };
+  });
   window.addEventListener('popstate', () => {
-    if (location.href !== _cur) pushHistory(location.href);
+    if (location.href !== _cur) onNavigated(location.href);
   });
 
-  /* ── Tell host our initial URL ── */
-  tellHost(location.href);
+  // Report initial URL
+  reportUrl(location.href);
 
   /* ════════════════════════════
      BAR UI
   ════════════════════════════ */
-  const BAR_Z  = 2147483647;
-  const COR_W  = 72;   // px from right to trigger
-  const COR_H  = 50;   // px from bottom to trigger
+  const COR_W = 80;
+  const COR_H = 52;
 
-  const style = document.createElement('style');
-  style.textContent = `
-    #__ufb {
-      all: initial;
-      position: fixed;
-      bottom: 0;
-      right: 0;
-      z-index: ${BAR_Z};
-      display: flex;
-      align-items: stretch;
-      background: #fff;
-      border-top: 1px solid #dadce0;
-      border-left: 1px solid #dadce0;
-      border-top-left-radius: 6px;
-      pointer-events: none;
-      opacity: 0;
-      transform: translateY(2px);
-      transition: opacity .13s ease, transform .13s ease;
-      font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
-      height: 30px;
-      overflow: hidden;
-      white-space: nowrap;
-      box-shadow: -1px -1px 6px rgba(0,0,0,0.07);
-    }
-    #__ufb.show { opacity: 1; transform: translateY(0); pointer-events: all; }
-
-    #__ufb .__ub {
-      all: unset;
-      display: flex; align-items: center; justify-content: center;
-      width: 30px; height: 30px;
-      cursor: pointer;
-      color: #5f6368;
-      flex-shrink: 0;
-      transition: background .1s, color .1s;
-      border-right: 1px solid #f1f3f4;
-    }
-    #__ufb .__ub:hover { background: #f1f3f4; color: #202124; }
-    #__ufb .__ub[disabled] { color: #ccc; cursor: default; pointer-events: none; }
-    #__ufb .__ub svg { width: 13px; height: 13px; display: block; }
-
-    #__ufb .__ui {
-      all: unset;
-      height: 30px;
-      padding: 0 8px;
-      font-size: 11.5px;
-      color: #202124;
-      width: 210px;
-      border-right: 1px solid #f1f3f4;
-      cursor: text;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      letter-spacing: 0;
-    }
-    #__ufb .__ui:focus { outline: none; background: #f8f9fa; }
-    #__ufb .__ui::placeholder { color: #9aa0a6; }
-
-    #__ufb .__ug {
-      all: unset;
-      display: flex; align-items: center;
-      padding: 0 11px;
-      height: 30px;
-      font-size: 11.5px;
-      font-weight: 500;
-      color: #1a73e8;
-      cursor: pointer;
-      transition: background .1s;
-      border-right: 1px solid #f1f3f4;
-      letter-spacing: .01em;
-    }
-    #__ufb .__ug:hover { background: #f1f3f4; }
-
-    #__ufb .__ugo {
-      all: unset;
-      display: flex; align-items: center;
-      padding: 0 9px;
-      height: 30px;
-      font-size: 11px;
-      color: #5f6368;
-      cursor: pointer;
-      transition: background .1s;
-      gap: 4px;
-    }
-    #__ufb .__ugo:hover { background: #f1f3f4; color: #202124; }
-    #__ufb .__ugo svg { width: 13px; height: 13px; display: block; }
-  `;
-  (document.head || document.documentElement).appendChild(style);
+  // Inject styles
+  const sty = document.createElement('style');
+  sty.textContent = `
+#__ufb{all:initial;position:fixed;bottom:0;right:0;z-index:2147483647;
+  display:flex;align-items:stretch;background:#fff;
+  border-top:1px solid #dadce0;border-left:1px solid #dadce0;
+  border-top-left-radius:5px;pointer-events:none;opacity:0;
+  transition:opacity .12s ease;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+  height:28px;overflow:hidden;white-space:nowrap;
+  box-shadow:-1px -1px 5px rgba(0,0,0,.08)}
+#__ufb.show{opacity:1;pointer-events:all}
+#__ufb .__ub{all:unset;display:flex;align-items:center;justify-content:center;
+  width:28px;height:28px;cursor:pointer;color:#5f6368;flex-shrink:0;
+  transition:background .1s,color .1s;border-right:1px solid #f1f3f4}
+#__ufb .__ub:hover{background:#f1f3f4;color:#202124}
+#__ufb .__ub[disabled]{color:#d0d0d0;cursor:default;pointer-events:none}
+#__ufb .__ub svg{width:12px;height:12px;display:block}
+#__ufb .__ui{all:unset;height:28px;padding:0 7px;font-size:11px;color:#202124;
+  width:200px;border-right:1px solid #f1f3f4;cursor:text;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#__ufb .__ui:focus{background:#f8f9fa}
+#__ufb .__ui::placeholder{color:#9aa0a6}
+#__ufb .__ugl{all:unset;display:flex;align-items:center;justify-content:center;
+  width:28px;height:28px;cursor:pointer;color:#5f6368;flex-shrink:0;
+  transition:background .1s,color .1s}
+#__ufb .__ugl:hover{background:#f1f3f4;color:#202124}
+#__ufb .__ugl svg{width:12px;height:12px;display:block}
+`;
+  (document.head || document.documentElement).appendChild(sty);
 
   const bar = document.createElement('div');
   bar.id = '__ufb';
 
-  // Back button
   const btnBack = document.createElement('button');
   btnBack.className = '__ub';
   btnBack.title = 'Back';
-  btnBack.setAttribute('disabled', '');
-  btnBack.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
-  btnBack.addEventListener('click', doBack);
+  btnBack.disabled = true;
+  btnBack.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
 
-  // Forward button
   const btnFwd = document.createElement('button');
   btnFwd.className = '__ub';
   btnFwd.title = 'Forward';
-  btnFwd.setAttribute('disabled', '');
-  btnFwd.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
-  btnFwd.addEventListener('click', doForward);
+  btnFwd.disabled = true;
+  btnFwd.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
-  // URL input
   const urlInput = document.createElement('input');
   urlInput.className = '__ui';
   urlInput.type = 'text';
   urlInput.spellcheck = false;
   urlInput.autocomplete = 'off';
-  urlInput.placeholder = 'Enter address or javascript:…';
-  urlInput.value = location.href;
+  urlInput.placeholder = 'Enter URL or javascript:…';
+  urlInput.value = _cur;
+
+  const btnGoogle = document.createElement('button');
+  btnGoogle.className = '__ugl';
+  btnGoogle.title = 'Google';
+  btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-3.5-3.5"/></svg>`;
+
+  bar.appendChild(btnBack);
+  bar.appendChild(btnFwd);
+  bar.appendChild(urlInput);
+  bar.appendChild(btnGoogle);
+  document.body.appendChild(bar);
+
+  function renderBar() {
+    btnBack.disabled = _hist.length === 0;
+    btnFwd.disabled  = _fwd.length  === 0;
+    if (document.activeElement !== urlInput) urlInput.value = _cur;
+  }
+
+  // Events
+  btnBack.addEventListener('click', () => {
+    if (!_hist.length) return;
+    const prev = _hist.pop();
+    _fwd.unshift(_cur);
+    _cur = prev;
+    renderBar();
+    requestNav(_cur);
+  });
+
+  btnFwd.addEventListener('click', () => {
+    if (!_fwd.length) return;
+    const next = _fwd.shift();
+    _hist.push(_cur);
+    _cur = next;
+    renderBar();
+    requestNav(_cur);
+  });
+
+  btnGoogle.addEventListener('click', () => requestNav('https://www.google.com/?igu=1'));
+
   urlInput.addEventListener('focus', () => urlInput.select());
   urlInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); doGo(); }
     if (e.key === 'Escape') { urlInput.value = _cur; urlInput.blur(); }
   });
 
-  // Google button
-  const btnGoogle = document.createElement('button');
-  btnGoogle.className = '__ugo';
-  btnGoogle.title = 'Go to Google';
-  btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>`;
-  btnGoogle.addEventListener('click', () => {
-    requestNav('https://www.google.com/?igu=1');
-  });
-
-  bar.appendChild(btnBack);
-  bar.appendChild(btnFwd);
-  bar.appendChild(urlInput);
-  bar.appendChild(btnGoogle);
-
-  document.body.appendChild(bar);
-
-  /* ── Corner hover trigger ── */
-  let _hideTimer = null;
-  const showBar = () => {
-    clearTimeout(_hideTimer);
-    bar.classList.add('show');
-  };
-  const hideBar = () => {
-    _hideTimer = setTimeout(() => bar.classList.remove('show'), 320);
-  };
-
-  document.addEventListener('mousemove', e => {
-    const fromR = window.innerWidth  - e.clientX;
-    const fromB = window.innerHeight - e.clientY;
-    if (fromR <= COR_W && fromB <= COR_H) showBar();
-  }, { passive: true });
-  bar.addEventListener('mouseenter', showBar);
-  bar.addEventListener('mouseleave', hideBar);
-  document.addEventListener('mouseleave', hideBar);
-
-  /* ── Navigation logic ── */
   function doGo() {
     let val = urlInput.value.trim();
     if (!val) return;
-
-    // Bookmarklet
     if (val.startsWith('javascript:')) {
-      try { eval(decodeURIComponent(val.slice('javascript:'.length))); } catch(e) { console.warn('Bookmarklet error', e); }
+      try { (0, eval)(val); } catch(err) { console.warn('Bookmarklet:', err); }
       urlInput.blur();
       return;
     }
-
-    // Auto-protocol
     if (!/^https?:\/\//i.test(val)) val = 'https://' + val;
-
     requestNav(val);
     urlInput.blur();
   }
 
-  function doBack() {
-    if (!_hist.length) return;
-    const prev = _hist.pop();
-    _fwd.unshift(_cur);
-    _cur = prev;
-    urlInput.value = _cur;
-    updateBar();
-    requestNav(_cur);
-  }
-
-  function doForward() {
-    if (!_fwd.length) return;
-    const next = _fwd.shift();
-    _hist.push(_cur);
-    _cur = next;
-    urlInput.value = _cur;
-    updateBar();
-    requestNav(_cur);
-  }
-
-  function updateBar() {
-    if (_hist.length > 0) {
-      btnBack.removeAttribute('disabled');
-    } else {
-      btnBack.setAttribute('disabled', '');
+  // Corner trigger
+  let _ht = null;
+  document.addEventListener('mousemove', e => {
+    if (window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H) {
+      clearTimeout(_ht);
+      bar.classList.add('show');
     }
-    if (_fwd.length > 0) {
-      btnFwd.removeAttribute('disabled');
-    } else {
-      btnFwd.setAttribute('disabled', '');
-    }
-    if (document.activeElement !== urlInput) {
-      urlInput.value = _cur;
-    }
-  }
+  }, { passive: true });
+  bar.addEventListener('mouseenter', () => { clearTimeout(_ht); bar.classList.add('show'); });
+  bar.addEventListener('mouseleave', () => { _ht = setTimeout(() => bar.classList.remove('show'), 300); });
+  document.addEventListener('mouseleave', () => { _ht = setTimeout(() => bar.classList.remove('show'), 300); });
 
 })();
