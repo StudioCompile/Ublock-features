@@ -1,160 +1,136 @@
 (function () {
   'use strict';
 
-  // Prevent double-injection
   if (window.__iframeMenuInjected) return;
   window.__iframeMenuInjected = true;
 
   const IS_IFRAME = window !== window.top;
 
   /* ─────────────────────────────────────────────
-     TOP-LAYER MANAGER
-     Runs on the host page (your website).
-     - Listens for navigate / urlChange messages
-     - Recreates the iframe on navigation
-     - Broadcasts current URL via custom event
-     - Detects blocked/error pages and swaps in custom page
+     HOST-PAGE MANAGER  (runs on your website)
+     - Watches iframes for load events
+     - Detects Chrome blocked/error pages and
+       replaces them with a custom blocked page
+     - Handles the "Go back" postMessage
+     No menu is rendered here.
   ───────────────────────────────────────────── */
   if (!IS_IFRAME) {
+
+    // Watch every iframe that exists now or is added later
+    function watchIframe(frame) {
+      if (frame.__ifmWatched) return;
+      frame.__ifmWatched = true;
+
+      frame.addEventListener('load', () => {
+        // Small delay — Chrome's error page needs a tick to fully render
+        setTimeout(() => checkForBlockedPage(frame), 50);
+      });
+
+      // Also check immediately in case it already loaded
+      setTimeout(() => checkForBlockedPage(frame), 50);
+    }
+
+    document.querySelectorAll('iframe').forEach(watchIframe);
+
+    const mo = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        m.addedNodes.forEach(n => {
+          if (n.tagName === 'IFRAME') watchIframe(n);
+          if (n.querySelectorAll) n.querySelectorAll('iframe').forEach(watchIframe);
+        });
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Back button from blocked page srcdoc
     window.addEventListener('message', (e) => {
-      if (!e.data || typeof e.data !== 'object') return;
-
-      // ── Recreate iframe with new src ──────────
-      if (e.data.type === '__ifm_navigate') {
-        const newUrl = e.data.url;
-        if (!newUrl) return;
-
-        const target = findIframeByWindow(e.source);
-        if (!target) return;
-
-        recreateIframe(target, newUrl);
-        dispatchUrlEvent(newUrl);
-      }
-
-      // ── URL change reported by iframe ─────────
-      if (e.data.type === '__ifm_urlChange') {
-        dispatchUrlEvent(e.data.url);
-      }
-
-      // ── Back button on blocked page ───────────
-      if (e.data.type === '__ifm_back') {
-        const target = findIframeByWindow(e.source);
-        if (target) {
-          try { target.contentWindow.history.back(); } catch {}
-        }
+      if (!e.data || e.data.type !== '__ifm_back') return;
+      // Find which iframe sent this (srcdoc iframes have null contentWindow origin
+      // but e.source still matches)
+      for (const f of document.querySelectorAll('iframe')) {
+        try {
+          if (f.contentWindow === e.source) {
+            // Navigate it back using our tracked history
+            const hist = f.__ifmHistory || [];
+            hist.pop(); // remove current (blocked) entry
+            const prev = hist.pop(); // go to previous
+            if (prev) {
+              f.__ifmHistory = hist;
+              f.src = prev;
+            } else {
+              f.src = 'about:blank';
+            }
+            break;
+          }
+        } catch {}
       }
     });
 
-    function findIframeByWindow(win) {
-      for (const f of document.querySelectorAll('iframe')) {
-        try { if (f.contentWindow === win) return f; } catch {}
-      }
-      return null;
-    }
-
-    function recreateIframe(oldFrame, newUrl) {
-      const parent  = oldFrame.parentNode;
-      const nextSib = oldFrame.nextSibling;
-      const attrs   = [...oldFrame.attributes];
-
-      oldFrame.remove();
-
-      const fresh = document.createElement('iframe');
-      for (const a of attrs) {
-        if (a.name !== 'src' && a.name !== 'srcdoc') fresh.setAttribute(a.name, a.value);
-      }
-      fresh.src = newUrl;
-
-      if (nextSib) parent.insertBefore(fresh, nextSib);
-      else parent.appendChild(fresh);
-
-      // After load, check if the page is blocked
-      fresh.addEventListener('load', () => checkForBlockedPage(fresh, newUrl));
-    }
-
-    /**
-     * Dispatch a custom event on the host window so your page JS can listen:
-     *   window.addEventListener('iframeUrlChange', e => console.log(e.detail.url));
-     *
-     * Also re-emits the raw postMessage so you can use either pattern:
-     *   window.addEventListener('message', e => { if(e.data?.type==='__ifm_urlChange') ... })
-     */
-    function dispatchUrlEvent(url) {
-      window.dispatchEvent(new CustomEvent('iframeUrlChange', { detail: { url } }));
-    }
-
-    /**
-     * Try to detect Chrome ERR_ / blocked pages.
-     * - If we can read the document and it has #main-frame-error → blocked
-     * - If we can't read (cross-origin SecurityError) the page loaded but
-     *   X-Frame-Options / CSP blocked the embed → show blocked page
-     */
-    function checkForBlockedPage(frame, attemptedUrl) {
-      let isBlocked = false;
+    function checkForBlockedPage(frame) {
+      let doc;
       try {
-        const doc = frame.contentDocument;
-        if (!doc) return;
-        // Chrome error pages have this element
-        if (doc.getElementById('main-frame-error')) isBlocked = true;
-        // ERR_ in title is another signal
-        if (!isBlocked && doc.title && /err_|blocked|denied|refused|cannot/i.test(doc.title)) {
-          isBlocked = true;
-        }
-        // about:blank after a failed load (Chrome sometimes lands here)
-        if (!isBlocked && doc.URL === 'about:blank' && attemptedUrl !== 'about:blank') {
-          isBlocked = true;
-        }
+        doc = frame.contentDocument;
       } catch {
-        // SecurityError = cross-origin page that loaded (fine, leave it)
-        // BUT if it's a real network error Chrome loads an error page at the
-        // same origin so we'd have gotten a SecurityError — treat as blocked.
-        isBlocked = true;
+        // SecurityError → legitimate cross-origin page loaded fine; do nothing
+        return;
       }
 
-      if (isBlocked) injectBlockedPage(frame, attemptedUrl);
+      if (!doc) return;
+
+      const frameUrl = (() => { try { return frame.contentWindow.location.href; } catch { return ''; } })();
+
+      // Chrome wraps network/blocked errors in chrome-error:// pages
+      const isChromError = frameUrl.startsWith('chrome-error://');
+      // Chrome also sometimes gives about:blank on X-Frame-Options blocks
+      const isAboutBlank = frameUrl === 'about:blank' || frameUrl === '';
+      // The error page contains this specific element
+      const hasErrorEl   = !!doc.getElementById('main-frame-error');
+
+      if (!isChromError && !hasErrorEl) return; // page loaded fine
+
+      // Grab the attempted URL from the frame's src before we overwrite it
+      const attemptedUrl = frame.getAttribute('src') || frameUrl || '';
+
+      injectBlockedPage(frame, attemptedUrl);
     }
 
     function injectBlockedPage(frame, blockedUrl) {
-      frame.removeAttribute('src');
-      frame.srcdoc = buildBlockedPageHTML(blockedUrl);
-    }
+      // Track history so Go Back works
+      if (!frame.__ifmHistory) frame.__ifmHistory = [];
+      // Don't push the blocked page itself — the previous src is already tracked
 
-    function buildBlockedPageHTML(blockedUrl) {
-      const safeUrl = (blockedUrl || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<!DOCTYPE html>
+      const safeUrl = (blockedUrl || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      frame.removeAttribute('src');
+      frame.srcdoc = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Page Blocked</title>
+<title>Can't open page</title>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%;background:#f7f7f8;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',system-ui,sans-serif}
-  .card{background:#fff;border:1px solid #e3e3e6;border-radius:16px;box-shadow:0 4px 28px rgba(0,0,0,0.09);padding:40px 36px 32px;max-width:380px;width:90%;text-align:center}
-  .icon{width:52px;height:52px;background:#fff1f1;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;border:1.5px solid #fcd0d0}
-  .icon svg{width:24px;height:24px;stroke:#e05252}
-  h1{font-size:17px;font-weight:650;color:#1a1a1a;margin-bottom:8px;letter-spacing:-.01em}
-  .url-box{font-size:11px;color:#888;background:#f3f3f5;border-radius:6px;padding:6px 10px;word-break:break-all;margin:10px 0 22px;line-height:1.5;text-align:left}
-  p{font-size:13px;color:#666;line-height:1.6;margin-bottom:24px}
-  .back-btn{display:inline-flex;align-items:center;gap:6px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:10px 22px;font-size:13px;font-weight:500;cursor:pointer;transition:background .15s,transform .1s;text-decoration:none}
-  .back-btn:hover{background:#333;transform:translateY(-1px)}
-  .back-btn svg{width:14px;height:14px;stroke:currentColor}
+  html,body{height:100%;background:#f5f5f7;display:flex;align-items:center;justify-content:center;font-family:-apple-system,'Segoe UI',system-ui,sans-serif}
+  .card{background:#fff;border:1px solid #e0e0e3;border-radius:18px;box-shadow:0 2px 24px rgba(0,0,0,0.08),0 1px 4px rgba(0,0,0,0.04);padding:44px 40px 36px;max-width:400px;width:92%;text-align:center}
+  .badge{width:56px;height:56px;background:#fff2f2;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;border:1.5px solid #ffd0d0}
+  .badge svg{width:26px;height:26px;stroke:#d94f4f;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  h1{font-size:18px;font-weight:700;color:#111;margin-bottom:6px;letter-spacing:-.02em}
+  .url-pill{display:inline-block;font-size:11px;color:#888;background:#f2f2f4;border-radius:20px;padding:4px 12px;margin:10px 0 18px;max-width:100%;word-break:break-all;line-height:1.5}
+  p{font-size:13.5px;color:#555;line-height:1.65;margin-bottom:28px}
+  .btn{display:inline-flex;align-items:center;gap:7px;background:#111;color:#fff;border:none;border-radius:10px;padding:11px 24px;font-size:13.5px;font-weight:500;cursor:pointer;letter-spacing:-.01em;transition:opacity .15s,transform .1s}
+  .btn:hover{opacity:.85;transform:translateY(-1px)}
+  .btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="icon">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-    </svg>
+  <div class="badge">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><circle cx="12" cy="16" r=".5" fill="#d94f4f"/></svg>
   </div>
-  <h1>This page can't be displayed</h1>
-  <div class="url-box">${safeUrl}</div>
-  <p>This site is blocked, refused the connection, or doesn't allow embedding in iframes.</p>
-  <button class="back-btn" onclick="window.parent.postMessage({type:'__ifm_back'},'*')">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="15 18 9 12 15 6"/>
-    </svg>
+  <h1>This page can't be opened</h1>
+  <div class="url-pill">${safeUrl}</div>
+  <p>This site has blocked iframe embedding, refused the connection, or isn't reachable right now.</p>
+  <button class="btn" onclick="window.parent.postMessage({type:'__ifm_back'},'*')">
+    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
     Go back
   </button>
 </div>
@@ -162,15 +138,28 @@
 </html>`;
     }
 
-    // Host-page setup done — no menu injected here
+    // Track iframe src changes so Go Back has a history to work with
+    const srcObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === 'attributes' && m.attributeName === 'src' && m.target.tagName === 'IFRAME') {
+          const frame = m.target;
+          if (!frame.__ifmHistory) frame.__ifmHistory = [];
+          const newSrc = frame.getAttribute('src');
+          if (newSrc && newSrc !== 'about:blank') frame.__ifmHistory.push(newSrc);
+        }
+      }
+    });
+    srcObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['src'], subtree: true });
+
+    // Done — no menu on host page
     return;
   }
 
   /* ─────────────────────────────────────────────
-     IFRAME-ONLY: MENU + NAV INTERCEPTOR
+     IFRAME-ONLY  ─  hover menu + URL broadcast
   ───────────────────────────────────────────── */
 
-  const TRIGGER_HEIGHT = 8;   // px from bottom that reveals menu
+  const TRIGGER_HEIGHT = 8;
   const MENU_ID  = '__ifm-menu';
   const STYLE_ID = '__ifm-style';
 
@@ -295,6 +284,16 @@
     <path d="M2 10h16M10 2a13 13 0 0 1 0 16M10 2a13 13 0 0 0 0 16"/>
   </svg>`;
 
+  let urlOpen = false;
+  let urlCard, urlBtn;
+
+  function closeCard() {
+    if (!urlOpen) return;
+    urlOpen = false;
+    urlCard.classList.remove('open');
+    urlBtn.classList.remove('active');
+  }
+
   function buildMenu() {
     if (!document.getElementById(STYLE_ID)) {
       const s = document.createElement('style');
@@ -306,7 +305,7 @@
     const menu = document.createElement('div');
     menu.id = MENU_ID;
 
-    const urlCard = document.createElement('div');
+    urlCard = document.createElement('div');
     urlCard.className = 'ifm-card';
     urlCard.innerHTML = `
       <div class="ifm-card-header">Current URL</div>
@@ -318,7 +317,7 @@
     const btnRow = document.createElement('div');
     btnRow.className = 'ifm-btn-row';
 
-    const urlBtn = document.createElement('button');
+    urlBtn = document.createElement('button');
     urlBtn.className = 'ifm-icon-btn';
     urlBtn.title = 'Show URL';
     urlBtn.innerHTML = ICON_URL;
@@ -327,8 +326,6 @@
     menu.appendChild(urlCard);
     menu.appendChild(btnRow);
     (document.body || document.documentElement).appendChild(menu);
-
-    let urlOpen = false;
 
     urlBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -344,7 +341,12 @@
       const done = () => {
         btn.textContent = 'Copied!';
         btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+          // Close the card after copy confirmation clears
+          closeCard();
+        }, 1200);
       };
       if (navigator.clipboard) {
         navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
@@ -369,7 +371,13 @@
   function initHoverTrigger(menu) {
     let timer = null;
     const show = () => { clearTimeout(timer); menu.classList.add('visible'); };
-    const hide = () => { timer = setTimeout(() => menu.classList.remove('visible'), 280); };
+    const hide = () => {
+      timer = setTimeout(() => {
+        menu.classList.remove('visible');
+        // Also close the card when the whole menu hides
+        closeCard();
+      }, 280);
+    };
 
     document.addEventListener('mousemove', (e) => {
       if (window.innerHeight - e.clientY <= TRIGGER_HEIGHT) show();
@@ -380,50 +388,16 @@
     document.addEventListener('mouseleave', hide);
   }
 
-  /**
-   * Broadcast current URL to the host page.
-   *
-   * Host page listens via EITHER:
-   *   window.addEventListener('message', e => {
-   *     if (e.data?.type === '__ifm_urlChange') console.log(e.data.url);
-   *   });
-   * OR (same-origin only — the top-layer manager fires this):
-   *   window.addEventListener('iframeUrlChange', e => console.log(e.detail.url));
-   */
+  // Broadcast URL to host page via postMessage
+  // Host listens: window.addEventListener('message', e => { if(e.data?.type==='__ifm_urlChange') ... })
   function broadcastUrl(url) {
-    try {
-      window.top.postMessage({ type: '__ifm_urlChange', url }, '*');
-    } catch {}
+    try { window.top.postMessage({ type: '__ifm_urlChange', url }, '*'); } catch {}
   }
 
   function initNavInterceptor() {
-    // Immediately broadcast on load
     broadcastUrl(location.href);
 
-    // Intercept anchor clicks
-    document.addEventListener('click', (e) => {
-      const anchor = e.composedPath().find(el => el && el.tagName === 'A');
-      if (!anchor) return;
-      const href = anchor.getAttribute('href');
-      if (!href || href.startsWith('#') || href.startsWith('javascript')) return;
-      let resolved;
-      try { resolved = new URL(href, location.href).href; } catch { return; }
-
-      // Same-page anchors already filtered; external navigation → intercept
-      e.preventDefault();
-      e.stopPropagation();
-      window.top.postMessage({ type: '__ifm_navigate', url: resolved }, '*');
-    }, true);
-
-    // Intercept form submissions
-    document.addEventListener('submit', (e) => {
-      let action = e.target.getAttribute('action') || location.href;
-      try { action = new URL(action, location.href).href; } catch { return; }
-      e.preventDefault();
-      window.top.postMessage({ type: '__ifm_navigate', url: action }, '*');
-    }, true);
-
-    // SPA navigation (pushState / replaceState / popstate)
+    // SPA navigation hooks
     const wrap = (orig) => function (...args) {
       const r = orig.apply(this, args);
       broadcastUrl(location.href);
