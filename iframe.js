@@ -6,10 +6,6 @@
 
   const IS_IFRAME = window !== window.top;
 
-  function escHtml(s) {
-    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
   /* ════════════════════════════════════════════════════════
      HOST PAGE
      Only job: watch iframes for Chrome error pages after load
@@ -26,77 +22,6 @@
       return null;
     }
 
-    // After a frame loads, check if Chrome landed on an error page.
-    // Chrome error pages are at chrome-error:// — readable from host.
-    // Cross-origin successful loads throw SecurityError — we ignore those (they're fine).
-    function checkAfterLoad(frame) {
-      if (frame.__ifmIsBlockedPage) return;
-
-      let href = '';
-      try {
-        href = frame.contentWindow.location.href;
-      } catch {
-        // SecurityError = real cross-origin page loaded fine. Do nothing.
-        return;
-      }
-
-      let blocked = false;
-      // Chrome puts X-Frame-Options blocked pages at chrome-error://
-      if (href.startsWith('chrome-error://') || href.startsWith('chrome://')) {
-        blocked = true;
-      }
-      // about:blank can appear after ERR_ network errors
-      if (!blocked && (href === 'about:blank' || href === '') && frame.__ifmPendingUrl) {
-        blocked = true;
-      }
-      // Same-origin Chrome error page DOM marker
-      if (!blocked) {
-        try {
-          const doc = frame.contentDocument;
-          if (doc && doc.getElementById('main-frame-error')) blocked = true;
-        } catch {}
-      }
-
-      if (blocked) {
-        const attempted = frame.__ifmPendingUrl || href;
-        showBlockedPage(frame, attempted);
-      }
-    }
-
-    function showBlockedPage(frame, url) {
-      const safe = escHtml(url);
-      // Save url so back button can use it to retry
-      frame.__ifmBlockedUrl = url;
-      frame.__ifmIsBlockedPage = true;
-      frame.srcdoc = buildBlockedPage(safe);
-      // srcdoc fires a load event — after that clear the flag so future real loads check normally
-      frame.addEventListener('load', () => {
-        // keep __ifmIsBlockedPage true while the blocked page is showing
-        // it gets cleared when we navigate away
-      }, { once: true });
-    }
-
-    function watchFrame(frame) {
-      if (frame.__ifmWatched) return;
-      frame.__ifmWatched = true;
-      // Track src so we know what was attempted
-      const initialSrc = frame.getAttribute('src');
-      if (initialSrc) frame.__ifmPendingUrl = initialSrc;
-
-      frame.addEventListener('load', () => setTimeout(() => checkAfterLoad(frame), 50));
-    }
-
-    // Watch for iframes added to DOM
-    new MutationObserver(muts => {
-      for (const m of muts) m.addedNodes.forEach(n => {
-        if (n.nodeType !== 1) return;
-        if (n.tagName === 'IFRAME') watchFrame(n);
-        if (n.querySelectorAll) n.querySelectorAll('iframe').forEach(watchFrame);
-      });
-    }).observe(document.documentElement, { childList: true, subtree: true });
-
-    document.querySelectorAll('iframe').forEach(watchFrame);
-
     function sendNavState(frame) {
       try {
         frame.contentWindow.postMessage({
@@ -110,22 +35,22 @@
 
     function doFrameNav(frame, url) {
       frame.__ifmPendingUrl = url;
-      frame.__ifmIsBlockedPage = false;
-      frame.removeAttribute('srcdoc');
+      // Update src so host page can read current URL — suppress the load-triggered sendNavState
+      // by using a property flag instead of a MutationObserver (no reload loop risk)
+      frame.__ifmSettingSrc = true;
       frame.src = url;
-      // Send nav state once the new page has loaded and its script has run
+      frame.__ifmSettingSrc = false;
       frame.addEventListener('load', () => {
         setTimeout(() => sendNavState(frame), 100);
       }, { once: true });
     }
 
-    // Handle messages from iframe side
     window.addEventListener('message', e => {
       if (!e.data || typeof e.data !== 'object') return;
       const frame = findFrameByWindow(e.source);
+      if (!frame) return;
 
       if (e.data.type === '__ifm_navigate') {
-        if (!frame) return;
         const url = e.data.url;
         const old = frame.__ifmPendingUrl;
         if (!frame.__ifmHist) frame.__ifmHist = [];
@@ -136,7 +61,6 @@
       }
 
       if (e.data.type === '__ifm_goback') {
-        if (!frame) return;
         if (!frame.__ifmHist) frame.__ifmHist = [];
         if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
         const prev = frame.__ifmHist.pop();
@@ -144,11 +68,9 @@
         const cur = frame.__ifmPendingUrl;
         if (cur && !cur.startsWith('data:')) frame.__ifmFwd.unshift(cur);
         doFrameNav(frame, prev);
-        sendNavState(frame);
       }
 
       if (e.data.type === '__ifm_goforward') {
-        if (!frame) return;
         if (!frame.__ifmHist) frame.__ifmHist = [];
         if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
         const next = frame.__ifmFwd.shift();
@@ -156,81 +78,27 @@
         const cur = frame.__ifmPendingUrl;
         if (cur && !cur.startsWith('data:')) frame.__ifmHist.push(cur);
         doFrameNav(frame, next);
-        sendNavState(frame);
       }
 
-      if (e.data.type === '__ifm_retry') {
-        if (!frame) return;
-        const url = frame.__ifmBlockedUrl || e.data.url;
-        if (url) doFrameNav(frame, url);
-      }
-
+      // Iframe reports its real current URL (initial load + every same-domain path change)
       if (e.data.type === '__ifm_currenturl') {
-        if (!frame) return;
         const newUrl = e.data.url;
         const old = frame.__ifmPendingUrl;
-        // Track same-domain directory changes in history
+        if (!frame.__ifmHist) frame.__ifmHist = [];
+        if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
         if (old && old !== newUrl && !old.startsWith('data:') && old !== 'about:blank') {
-          if (!frame.__ifmHist) frame.__ifmHist = [];
-          if (!frame.__ifmFwd)  frame.__ifmFwd  = [];
           frame.__ifmHist.push(old);
           frame.__ifmFwd = [];
         }
         frame.__ifmPendingUrl = newUrl;
+        // Update frame.src so external observers on the host page can read it.
+        // We set __ifmSettingSrc so any load listener knows this is intentional.
+        frame.__ifmSettingSrc = true;
+        try { frame.setAttribute('src', newUrl); } catch {}
+        frame.__ifmSettingSrc = false;
         sendNavState(frame);
       }
     });
-
-    function buildBlockedPage(safeUrl) {
-      return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>This site can\u2019t be reached</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#fff;
-  color:#202124;display:flex;flex-direction:column;align-items:center;
-  justify-content:center;min-height:100vh;padding:40px 20px}
-.icon{width:72px;height:72px;background:#f1f3f4;border-radius:50%;
-  display:flex;align-items:center;justify-content:center;margin-bottom:24px}
-.icon svg{width:36px;height:36px;stroke:#80868b;fill:none;stroke-width:1.5;
-  stroke-linecap:round;stroke-linejoin:round}
-h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
-.url{font-size:12px;color:#5f6368;margin-bottom:24px;text-align:center;
-  max-width:420px;word-break:break-all}
-.msg{font-size:13px;color:#5f6368;max-width:420px;text-align:center;
-  line-height:1.6;margin-bottom:32px}
-.btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
-.btn{font-size:13px;font-weight:500;border:none;border-radius:4px;
-  padding:9px 20px;cursor:pointer;transition:box-shadow .15s,background .15s}
-.back{background:#f1f3f4;color:#202124}
-.back:hover{background:#e8eaed}
-.retry{background:#1a73e8;color:#fff}
-.retry:hover{background:#1765cc;box-shadow:0 1px 4px rgba(0,0,0,.2)}
-.brand{position:fixed;bottom:14px;right:14px;display:flex;align-items:center;
-  gap:5px;opacity:.4}
-.brand img{width:16px;height:16px;border-radius:3px}
-.brand span{font-size:11px;color:#777;font-weight:500}
-</style></head><body>
-<div class="icon"><svg viewBox="0 0 24 24">
-  <circle cx="12" cy="12" r="10"/>
-  <line x1="12" y1="8" x2="12" y2="12"/>
-  <line x1="12" y1="16" x2="12.01" y2="16" stroke-width="2.5"/>
-</svg></div>
-<h1>This site can\u2019t be reached</h1>
-<div class="url">${safeUrl}</div>
-<div class="msg">This site refused to connect or has blocked embedding.<br>
-<span style="font-size:11px;font-family:monospace;color:#bbb">ERR_BLOCKED_BY_RESPONSE</span></div>
-<div class="btns">
-  <button class="btn back" onclick="window.parent.postMessage({type:'__ifm_goback'},'*')">Back</button>
-  <button class="btn retry" onclick="window.parent.postMessage({type:'__ifm_retry',url:'${safeUrl}'},'*')">Try again</button>
-</div>
-<div class="brand">
-  <img src="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png" alt="">
-  <span>uFeatures</span>
-</div>
-</body></html>`;
-    }
 
     return; // host page done — no UI here
   }
