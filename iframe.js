@@ -8,12 +8,35 @@
 
   /* ════════════════════════════════════════════════════════
      HOST PAGE
-     Only job: watch iframes for Chrome error pages after load
-     and replace with custom blocked page via srcdoc.
-     Does NOT intercept src changes (that caused the reload loop).
-     Navigation is driven entirely by postMessage from iframe side.
   ════════════════════════════════════════════════════════ */
   if (!IS_IFRAME) {
+
+    function hijackSrc(frame) {
+      let _src = frame.getAttribute('src') || '';
+      const define = () => Object.defineProperty(frame, 'src', {
+        get: () => _src,
+        set: (v) => { _src = v; }, // silent no-op — won't trigger navigation
+        configurable: true,
+        enumerable: true,
+      });
+      define();
+      return {
+        navigate(url) {
+          delete frame.src;   // restore native setter temporarily
+          frame.src = url;    // real navigation
+          _src = url;
+          define();           // re-shadow immediately so reads stay current
+        },
+        update(url) {
+          _src = url;         // reflect same-domain pushState/popstate silently
+        }
+      };
+    }
+
+    function getOrInitSrc(frame) {
+      if (!frame.__ifmSrc) frame.__ifmSrc = hijackSrc(frame);
+      return frame.__ifmSrc;
+    }
 
     function findFrameByWindow(win) {
       for (const f of document.querySelectorAll('iframe')) {
@@ -35,11 +58,7 @@
 
     function doFrameNav(frame, url) {
       frame.__ifmPendingUrl = url;
-      // Update src so host page can read current URL — suppress the load-triggered sendNavState
-      // by using a property flag instead of a MutationObserver (no reload loop risk)
-      frame.__ifmSettingSrc = true;
-      frame.src = url;
-      frame.__ifmSettingSrc = false;
+      getOrInitSrc(frame).navigate(url);
       frame.addEventListener('load', () => {
         setTimeout(() => sendNavState(frame), 100);
       }, { once: true });
@@ -91,24 +110,16 @@
           frame.__ifmFwd = [];
         }
         frame.__ifmPendingUrl = newUrl;
-        // Update frame.src so external observers on the host page can read it.
-        // We set __ifmSettingSrc so any load listener knows this is intentional.
-        frame.__ifmSettingSrc = true;
-        try { frame.setAttribute('src', newUrl); } catch {}
-        frame.__ifmSettingSrc = false;
+        getOrInitSrc(frame).update(newUrl); // silently keeps frame.src current, no reload
         sendNavState(frame);
       }
     });
 
-    return; // host page done — no UI here
+    return; // host page done
   }
 
   /* ════════════════════════════════════════════════════════
      IFRAME SIDE
-     - Intercepts link clicks (same frame unless Ctrl)
-     - History lives on HOST (survives page reloads)
-     - Bottom-right corner bar: back, fwd, url input, google
-     - Reports current URL to host (metadata only)
   ════════════════════════════════════════════════════════ */
 
   let _cur = location.href;
@@ -125,7 +136,6 @@
     sendToHost({ type: '__ifm_currenturl', url });
   }
 
-  // SPA navigations — just report, history managed by host
   function onNavigated(url) {
     if (!url || url === _cur) return;
     if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) return;
@@ -139,11 +149,8 @@
     if (!a) return;
     const href = a.getAttribute('href');
     if (!href || href.startsWith('#')) return;
-    // Bookmarklets: let doGo handle them, not link clicks
     if (href.startsWith('javascript:')) return;
-    // Ctrl/Meta = new tab
     if (e.ctrlKey || e.metaKey) return;
-    // Force same-frame
     e.preventDefault();
     e.stopPropagation();
     let resolved;
@@ -151,7 +158,6 @@
     requestNav(resolved);
   }, true);
 
-  // Neutralise target=_blank unless Ctrl held
   document.addEventListener('click', e => {
     const a = e.composedPath().find(n => n && n.tagName === 'A');
     if (a && a.target === '_blank' && !e.ctrlKey && !e.metaKey) a.target = '_self';
@@ -170,7 +176,6 @@
     if (location.href !== _cur) onNavigated(location.href);
   });
 
-  // Report initial URL
   reportUrl(location.href);
 
   /* ════════════════════════════
@@ -179,7 +184,6 @@
   const COR_W = 80;
   const COR_H = 52;
 
-  // Inject styles
   const sty = document.createElement('style');
   sty.textContent = `
 #__ufb{all:initial;position:fixed;bottom:0;right:0;z-index:2147483647;
@@ -224,11 +228,9 @@
   btnFwd.disabled = true;
   btnFwd.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
-  // Google button — before URL input so it's clear it navigates to Google, not searches input
   const btnGoogle = document.createElement('button');
   btnGoogle.className = '__ugl';
   btnGoogle.title = 'Go to Google';
-  // Coloured G logo
   btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>`;
 
   const urlInput = document.createElement('input');
@@ -239,7 +241,6 @@
   urlInput.placeholder = 'Enter URL or javascript:…';
   urlInput.value = _cur;
 
-  // Order: back, fwd, google, url
   bar.appendChild(btnBack);
   bar.appendChild(btnFwd);
   bar.appendChild(btnGoogle);
@@ -251,7 +252,6 @@
     btnFwd.disabled  = !canFwd;
   }
 
-  // Listen for nav state updates from host
   window.addEventListener('message', e => {
     if (!e.data || e.data.type !== '__ifm_navstate') return;
     renderBar(e.data.canBack, e.data.canFwd);
@@ -259,7 +259,6 @@
     if (document.activeElement !== urlInput) urlInput.value = _cur;
   });
 
-  // Events
   btnBack.addEventListener('click', () => sendToHost({ type: '__ifm_goback' }));
   btnFwd.addEventListener('click',  () => sendToHost({ type: '__ifm_goforward' }));
   btnGoogle.addEventListener('click', () => requestNav('https://www.google.com/?igu=1'));
@@ -283,7 +282,6 @@
     urlInput.blur();
   }
 
-  // Corner trigger
   let _ht = null;
   let _barHovered = false;
   const _hide = () => { _ht = setTimeout(() => bar.classList.remove('show'), 220); };
@@ -291,10 +289,7 @@
 
   document.addEventListener('mousemove', e => {
     const inCorner = window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H;
-    if (inCorner || _barHovered) {
-      _show();
-    }
-    // Don't reset the hide timer here — let mouseleave handle hiding
+    if (inCorner || _barHovered) _show();
   }, { passive: true });
   bar.addEventListener('mouseenter', () => { _barHovered = true;  _show(); });
   bar.addEventListener('mouseleave', () => { _barHovered = false; _hide(); });
