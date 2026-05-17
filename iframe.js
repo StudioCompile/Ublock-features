@@ -2,25 +2,184 @@
   'use strict';
 
   // Prevent double-injection
-  if (window.__devMenuInjected) return;
-  window.__devMenuInjected = true;
+  if (window.__iframeMenuInjected) return;
+  window.__iframeMenuInjected = true;
+
+  const IS_IFRAME = window !== window.top;
 
   /* ─────────────────────────────────────────────
-     CONSTANTS
+     TOP-LAYER MANAGER
+     Runs on the host page (your website).
+     - Listens for navigate / urlChange messages
+     - Recreates the iframe on navigation
+     - Broadcasts current URL via custom event
+     - Detects blocked/error pages and swaps in custom page
   ───────────────────────────────────────────── */
-  const TRIGGER_HEIGHT = 8;   // px from bottom edge that activates the zone
-  const MENU_ID        = '__dev-corner-menu';
-  const STYLE_ID       = '__dev-corner-style';
+  if (!IS_IFRAME) {
+    window.addEventListener('message', (e) => {
+      if (!e.data || typeof e.data !== 'object') return;
+
+      // ── Recreate iframe with new src ──────────
+      if (e.data.type === '__ifm_navigate') {
+        const newUrl = e.data.url;
+        if (!newUrl) return;
+
+        const target = findIframeByWindow(e.source);
+        if (!target) return;
+
+        recreateIframe(target, newUrl);
+        dispatchUrlEvent(newUrl);
+      }
+
+      // ── URL change reported by iframe ─────────
+      if (e.data.type === '__ifm_urlChange') {
+        dispatchUrlEvent(e.data.url);
+      }
+
+      // ── Back button on blocked page ───────────
+      if (e.data.type === '__ifm_back') {
+        const target = findIframeByWindow(e.source);
+        if (target) {
+          try { target.contentWindow.history.back(); } catch {}
+        }
+      }
+    });
+
+    function findIframeByWindow(win) {
+      for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentWindow === win) return f; } catch {}
+      }
+      return null;
+    }
+
+    function recreateIframe(oldFrame, newUrl) {
+      const parent  = oldFrame.parentNode;
+      const nextSib = oldFrame.nextSibling;
+      const attrs   = [...oldFrame.attributes];
+
+      oldFrame.remove();
+
+      const fresh = document.createElement('iframe');
+      for (const a of attrs) {
+        if (a.name !== 'src' && a.name !== 'srcdoc') fresh.setAttribute(a.name, a.value);
+      }
+      fresh.src = newUrl;
+
+      if (nextSib) parent.insertBefore(fresh, nextSib);
+      else parent.appendChild(fresh);
+
+      // After load, check if the page is blocked
+      fresh.addEventListener('load', () => checkForBlockedPage(fresh, newUrl));
+    }
+
+    /**
+     * Dispatch a custom event on the host window so your page JS can listen:
+     *   window.addEventListener('iframeUrlChange', e => console.log(e.detail.url));
+     *
+     * Also re-emits the raw postMessage so you can use either pattern:
+     *   window.addEventListener('message', e => { if(e.data?.type==='__ifm_urlChange') ... })
+     */
+    function dispatchUrlEvent(url) {
+      window.dispatchEvent(new CustomEvent('iframeUrlChange', { detail: { url } }));
+    }
+
+    /**
+     * Try to detect Chrome ERR_ / blocked pages.
+     * - If we can read the document and it has #main-frame-error → blocked
+     * - If we can't read (cross-origin SecurityError) the page loaded but
+     *   X-Frame-Options / CSP blocked the embed → show blocked page
+     */
+    function checkForBlockedPage(frame, attemptedUrl) {
+      let isBlocked = false;
+      try {
+        const doc = frame.contentDocument;
+        if (!doc) return;
+        // Chrome error pages have this element
+        if (doc.getElementById('main-frame-error')) isBlocked = true;
+        // ERR_ in title is another signal
+        if (!isBlocked && doc.title && /err_|blocked|denied|refused|cannot/i.test(doc.title)) {
+          isBlocked = true;
+        }
+        // about:blank after a failed load (Chrome sometimes lands here)
+        if (!isBlocked && doc.URL === 'about:blank' && attemptedUrl !== 'about:blank') {
+          isBlocked = true;
+        }
+      } catch {
+        // SecurityError = cross-origin page that loaded (fine, leave it)
+        // BUT if it's a real network error Chrome loads an error page at the
+        // same origin so we'd have gotten a SecurityError — treat as blocked.
+        isBlocked = true;
+      }
+
+      if (isBlocked) injectBlockedPage(frame, attemptedUrl);
+    }
+
+    function injectBlockedPage(frame, blockedUrl) {
+      frame.removeAttribute('src');
+      frame.srcdoc = buildBlockedPageHTML(blockedUrl);
+    }
+
+    function buildBlockedPageHTML(blockedUrl) {
+      const safeUrl = (blockedUrl || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Page Blocked</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#f7f7f8;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',system-ui,sans-serif}
+  .card{background:#fff;border:1px solid #e3e3e6;border-radius:16px;box-shadow:0 4px 28px rgba(0,0,0,0.09);padding:40px 36px 32px;max-width:380px;width:90%;text-align:center}
+  .icon{width:52px;height:52px;background:#fff1f1;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;border:1.5px solid #fcd0d0}
+  .icon svg{width:24px;height:24px;stroke:#e05252}
+  h1{font-size:17px;font-weight:650;color:#1a1a1a;margin-bottom:8px;letter-spacing:-.01em}
+  .url-box{font-size:11px;color:#888;background:#f3f3f5;border-radius:6px;padding:6px 10px;word-break:break-all;margin:10px 0 22px;line-height:1.5;text-align:left}
+  p{font-size:13px;color:#666;line-height:1.6;margin-bottom:24px}
+  .back-btn{display:inline-flex;align-items:center;gap:6px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:10px 22px;font-size:13px;font-weight:500;cursor:pointer;transition:background .15s,transform .1s;text-decoration:none}
+  .back-btn:hover{background:#333;transform:translateY(-1px)}
+  .back-btn svg{width:14px;height:14px;stroke:currentColor}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+  </div>
+  <h1>This page can't be displayed</h1>
+  <div class="url-box">${safeUrl}</div>
+  <p>This site is blocked, refused the connection, or doesn't allow embedding in iframes.</p>
+  <button class="back-btn" onclick="window.parent.postMessage({type:'__ifm_back'},'*')">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+    Go back
+  </button>
+</div>
+</body>
+</html>`;
+    }
+
+    // Host-page setup done — no menu injected here
+    return;
+  }
 
   /* ─────────────────────────────────────────────
-     STYLES
+     IFRAME-ONLY: MENU + NAV INTERCEPTOR
   ───────────────────────────────────────────── */
+
+  const TRIGGER_HEIGHT = 8;   // px from bottom that reveals menu
+  const MENU_ID  = '__ifm-menu';
+  const STYLE_ID = '__ifm-style';
+
   const css = `
     #${MENU_ID} {
       all: initial;
       position: fixed;
-      bottom: 16px;
-      right: 16px;
+      bottom: 14px;
+      right: 14px;
       z-index: 2147483647;
       font-family: 'Segoe UI', system-ui, sans-serif;
       display: flex;
@@ -29,61 +188,53 @@
       gap: 6px;
       pointer-events: none;
       opacity: 0;
-      transform: translateY(6px);
-      transition: opacity 0.18s ease, transform 0.18s ease;
+      transform: translateY(5px);
+      transition: opacity 0.16s ease, transform 0.16s ease;
     }
     #${MENU_ID}.visible {
       opacity: 1;
       transform: translateY(0);
       pointer-events: all;
     }
-
-    /* Card container */
-    #${MENU_ID} .dm-card {
-      background: #ffffff;
+    #${MENU_ID} .ifm-card {
+      background: #fff;
       border: 1px solid #e2e2e2;
       border-radius: 10px;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.13), 0 1px 4px rgba(0,0,0,0.07);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.06);
       overflow: hidden;
       display: none;
       flex-direction: column;
       min-width: 260px;
       max-width: 340px;
     }
-    #${MENU_ID} .dm-card.open {
-      display: flex;
-    }
-
-    /* Card header */
-    #${MENU_ID} .dm-card-header {
-      padding: 8px 12px 6px;
+    #${MENU_ID} .ifm-card.open { display: flex; }
+    #${MENU_ID} .ifm-card-header {
+      padding: 7px 12px 6px;
       font-size: 10px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: .08em;
       text-transform: uppercase;
-      color: #999;
+      color: #aaa;
       border-bottom: 1px solid #f0f0f0;
       background: #fafafa;
     }
-
-    /* URL panel */
-    #${MENU_ID} .dm-url-row {
+    #${MENU_ID} .ifm-url-row {
       display: flex;
       align-items: center;
       gap: 8px;
       padding: 10px 12px;
     }
-    #${MENU_ID} .dm-url-text {
+    #${MENU_ID} .ifm-url-text {
       flex: 1;
-      font-size: 12px;
+      font-size: 11.5px;
       color: #333;
       word-break: break-all;
-      line-height: 1.4;
-      max-height: 56px;
+      line-height: 1.45;
+      max-height: 58px;
       overflow-y: auto;
       scrollbar-width: thin;
     }
-    #${MENU_ID} .dm-copy-btn {
+    #${MENU_ID} .ifm-copy-btn {
       flex-shrink: 0;
       border: 1px solid #ddd;
       background: #fff;
@@ -93,29 +244,25 @@
       font-weight: 500;
       color: #444;
       cursor: pointer;
-      transition: background 0.12s, color 0.12s;
+      transition: background .12s, color .12s, border-color .12s;
       white-space: nowrap;
     }
-    #${MENU_ID} .dm-copy-btn:hover {
-      background: #f0f0f0;
-    }
-    #${MENU_ID} .dm-copy-btn.copied {
-      background: #e6f9ee;
+    #${MENU_ID} .ifm-copy-btn:hover { background: #f0f0f0; }
+    #${MENU_ID} .ifm-copy-btn.copied {
+      background: #e8faf2;
       color: #1a9e50;
-      border-color: #a8e6c0;
+      border-color: #aadfc0;
     }
-
-    /* Button row */
-    #${MENU_ID} .dm-btn-row {
+    #${MENU_ID} .ifm-btn-row {
       display: flex;
       gap: 6px;
       justify-content: flex-end;
     }
-    #${MENU_ID} .dm-icon-btn {
+    #${MENU_ID} .ifm-icon-btn {
       all: unset;
-      width: 36px;
-      height: 36px;
-      background: #ffffff;
+      width: 34px;
+      height: 34px;
+      background: #fff;
       border: 1px solid #e2e2e2;
       border-radius: 8px;
       display: flex;
@@ -123,304 +270,174 @@
       justify-content: center;
       cursor: pointer;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-      transition: background 0.12s, box-shadow 0.12s, transform 0.1s;
+      transition: background .12s, box-shadow .12s, transform .1s;
       color: #555;
     }
-    #${MENU_ID} .dm-icon-btn:hover {
+    #${MENU_ID} .ifm-icon-btn:hover {
       background: #f5f5f5;
-      box-shadow: 0 3px 12px rgba(0,0,0,0.13);
+      box-shadow: 0 3px 12px rgba(0,0,0,0.12);
       transform: translateY(-1px);
     }
-    #${MENU_ID} .dm-icon-btn.active {
+    #${MENU_ID} .ifm-icon-btn.active {
       background: #f0f4ff;
-      border-color: #b0c0f0;
+      border-color: #b0c2f5;
       color: #2244cc;
     }
-    #${MENU_ID} .dm-icon-btn svg {
-      width: 16px;
-      height: 16px;
+    #${MENU_ID} .ifm-icon-btn svg {
+      width: 15px;
+      height: 15px;
       display: block;
-    }
-
-    /* Inspect iframe */
-    #${MENU_ID} .dm-inspect-frame-wrap {
-      display: none;
-    }
-    #${MENU_ID} .dm-inspect-frame-wrap.open {
-      display: block;
-    }
-    #${MENU_ID} .dm-inspect-frame-wrap iframe {
-      display: block;
-      width: 100%;
-      height: 340px;
-      border: none;
     }
   `;
 
-  /* ─────────────────────────────────────────────
-     SVG ICONS
-  ───────────────────────────────────────────── */
-  const ICON_URL = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  const ICON_URL = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="10" cy="10" r="8"/>
     <path d="M2 10h16M10 2a13 13 0 0 1 0 16M10 2a13 13 0 0 0 0 16"/>
   </svg>`;
 
-  const ICON_INSPECT = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="2" y="3" width="16" height="12" rx="2"/>
-    <path d="M7 17h6M10 15v2"/>
-    <path d="M6 7l2.5 2.5L6 12M10.5 12h3.5"/>
-  </svg>`;
-
-  /* ─────────────────────────────────────────────
-     BUILD DOM
-  ───────────────────────────────────────────── */
   function buildMenu() {
-    // Style tag
     if (!document.getElementById(STYLE_ID)) {
-      const style = document.createElement('style');
-      style.id = STYLE_ID;
-      style.textContent = css;
-      (document.head || document.documentElement).appendChild(style);
+      const s = document.createElement('style');
+      s.id = STYLE_ID;
+      s.textContent = css;
+      (document.head || document.documentElement).appendChild(s);
     }
 
     const menu = document.createElement('div');
     menu.id = MENU_ID;
 
-    // ── URL Card ──────────────────────────────
     const urlCard = document.createElement('div');
-    urlCard.className = 'dm-card';
-    urlCard.id = '__dm-url-card';
+    urlCard.className = 'ifm-card';
     urlCard.innerHTML = `
-      <div class="dm-card-header">Current URL</div>
-      <div class="dm-url-row">
-        <div class="dm-url-text" id="__dm-url-text">${location.href}</div>
-        <button class="dm-copy-btn" id="__dm-copy-btn">Copy</button>
+      <div class="ifm-card-header">Current URL</div>
+      <div class="ifm-url-row">
+        <div class="ifm-url-text" id="__ifm-url-text">${location.href}</div>
+        <button class="ifm-copy-btn" id="__ifm-copy-btn">Copy</button>
       </div>`;
 
-    // ── Inspect Card ──────────────────────────
-    const inspectCard = document.createElement('div');
-    inspectCard.className = 'dm-card';
-    inspectCard.id = '__dm-inspect-card';
-    inspectCard.innerHTML = `
-      <div class="dm-card-header">Inspect (Chii)</div>
-      <div class="dm-inspect-frame-wrap open">
-        <iframe src="https://chii.liriliri.io" id="__dm-chii-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
-      </div>`;
-
-    // ── Icon Buttons ───────────────────────────
     const btnRow = document.createElement('div');
-    btnRow.className = 'dm-btn-row';
+    btnRow.className = 'ifm-btn-row';
 
     const urlBtn = document.createElement('button');
-    urlBtn.className = 'dm-icon-btn';
+    urlBtn.className = 'ifm-icon-btn';
     urlBtn.title = 'Show URL';
     urlBtn.innerHTML = ICON_URL;
-
-    const inspectBtn = document.createElement('button');
-    inspectBtn.className = 'dm-icon-btn';
-    inspectBtn.title = 'Inspect (Chii)';
-    inspectBtn.innerHTML = ICON_INSPECT;
-
     btnRow.appendChild(urlBtn);
-    btnRow.appendChild(inspectBtn);
 
     menu.appendChild(urlCard);
-    menu.appendChild(inspectCard);
     menu.appendChild(btnRow);
-
     (document.body || document.documentElement).appendChild(menu);
 
-    // ── State ─────────────────────────────────
-    let urlOpen     = false;
-    let inspectOpen = false;
-
-    function setUrl(open) {
-      urlOpen = open;
-      urlCard.classList.toggle('open', open);
-      urlBtn.classList.toggle('active', open);
-      if (open) document.getElementById('__dm-url-text').textContent = location.href;
-    }
-
-    function setInspect(open) {
-      inspectOpen = open;
-      inspectCard.classList.toggle('open', open);
-      inspectBtn.classList.toggle('active', open);
-    }
+    let urlOpen = false;
 
     urlBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      setUrl(!urlOpen);
+      urlOpen = !urlOpen;
+      urlCard.classList.toggle('open', urlOpen);
+      urlBtn.classList.toggle('active', urlOpen);
+      if (urlOpen) document.getElementById('__ifm-url-text').textContent = location.href;
     });
 
-    inspectBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setInspect(!inspectOpen);
-    });
-
-    // Copy button
-    document.getElementById('__dm-copy-btn').addEventListener('click', () => {
+    document.getElementById('__ifm-copy-btn').addEventListener('click', () => {
       const url = location.href;
-      navigator.clipboard.writeText(url).then(() => {
-        const btn = document.getElementById('__dm-copy-btn');
+      const btn = document.getElementById('__ifm-copy-btn');
+      const done = () => {
         btn.textContent = 'Copied!';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.textContent = 'Copy';
-          btn.classList.remove('copied');
-        }, 1500);
-      }).catch(() => {
-        // Fallback
-        const ta = document.createElement('textarea');
-        ta.value = url;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-      });
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      };
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
+      } else {
+        fallbackCopy(url, done);
+      }
     });
 
     return menu;
   }
 
-  /* ─────────────────────────────────────────────
-     HOVER TRIGGER ZONE (bottom 8px of window)
-  ───────────────────────────────────────────── */
-  function initHoverTrigger(menu) {
-    let hideTimer = null;
-
-    function show() {
-      clearTimeout(hideTimer);
-      menu.classList.add('visible');
-    }
-
-    function scheduleHide() {
-      hideTimer = setTimeout(() => {
-        // Only hide if mouse is not over the menu itself
-        menu.classList.remove('visible');
-      }, 300);
-    }
-
-    document.addEventListener('mousemove', (e) => {
-      const fromBottom = window.innerHeight - e.clientY;
-      if (fromBottom <= TRIGGER_HEIGHT) {
-        show();
-      }
-    }, { passive: true });
-
-    menu.addEventListener('mouseenter', () => {
-      clearTimeout(hideTimer);
-      menu.classList.add('visible');
-    });
-
-    menu.addEventListener('mouseleave', scheduleHide);
-
-    document.addEventListener('mouseleave', scheduleHide);
+  function fallbackCopy(text, cb) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    Object.assign(ta.style, { position: 'fixed', opacity: '0', top: '0', left: '0' });
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); cb(); } catch {}
+    ta.remove();
   }
 
-  /* ─────────────────────────────────────────────
-     IFRAME NAVIGATION INTERCEPTOR
-     When this script runs inside an iframe, intercept
-     link clicks and tell the top layer to recreate
-     the iframe with the new URL.
-  ───────────────────────────────────────────── */
-  function initIframeNavInterceptor() {
-    if (window === window.top) return; // only in iframes
+  function initHoverTrigger(menu) {
+    let timer = null;
+    const show = () => { clearTimeout(timer); menu.classList.add('visible'); };
+    const hide = () => { timer = setTimeout(() => menu.classList.remove('visible'), 280); };
 
-    function interceptLink(e) {
-      const anchor = e.composedPath().find(el => el.tagName === 'A');
+    document.addEventListener('mousemove', (e) => {
+      if (window.innerHeight - e.clientY <= TRIGGER_HEIGHT) show();
+    }, { passive: true });
+
+    menu.addEventListener('mouseenter', show);
+    menu.addEventListener('mouseleave', hide);
+    document.addEventListener('mouseleave', hide);
+  }
+
+  /**
+   * Broadcast current URL to the host page.
+   *
+   * Host page listens via EITHER:
+   *   window.addEventListener('message', e => {
+   *     if (e.data?.type === '__ifm_urlChange') console.log(e.data.url);
+   *   });
+   * OR (same-origin only — the top-layer manager fires this):
+   *   window.addEventListener('iframeUrlChange', e => console.log(e.detail.url));
+   */
+  function broadcastUrl(url) {
+    try {
+      window.top.postMessage({ type: '__ifm_urlChange', url }, '*');
+    } catch {}
+  }
+
+  function initNavInterceptor() {
+    // Immediately broadcast on load
+    broadcastUrl(location.href);
+
+    // Intercept anchor clicks
+    document.addEventListener('click', (e) => {
+      const anchor = e.composedPath().find(el => el && el.tagName === 'A');
       if (!anchor) return;
       const href = anchor.getAttribute('href');
       if (!href || href.startsWith('#') || href.startsWith('javascript')) return;
-
-      // Resolve to absolute URL
       let resolved;
-      try {
-        resolved = new URL(href, location.href).href;
-      } catch {
-        return;
-      }
+      try { resolved = new URL(href, location.href).href; } catch { return; }
 
+      // Same-page anchors already filtered; external navigation → intercept
       e.preventDefault();
       e.stopPropagation();
+      window.top.postMessage({ type: '__ifm_navigate', url: resolved }, '*');
+    }, true);
 
-      // Post message to parent (top layer) to recreate iframe
-      window.top.postMessage({ type: '__devMenu_navigate', url: resolved }, '*');
-    }
-
-    document.addEventListener('click', interceptLink, true);
-
-    // Also intercept form submissions
+    // Intercept form submissions
     document.addEventListener('submit', (e) => {
-      const form = e.target;
-      let action = form.getAttribute('action') || location.href;
+      let action = e.target.getAttribute('action') || location.href;
       try { action = new URL(action, location.href).href; } catch { return; }
       e.preventDefault();
-      window.top.postMessage({ type: '__devMenu_navigate', url: action }, '*');
+      window.top.postMessage({ type: '__ifm_navigate', url: action }, '*');
     }, true);
+
+    // SPA navigation (pushState / replaceState / popstate)
+    const wrap = (orig) => function (...args) {
+      const r = orig.apply(this, args);
+      broadcastUrl(location.href);
+      return r;
+    };
+    history.pushState    = wrap(history.pushState);
+    history.replaceState = wrap(history.replaceState);
+    window.addEventListener('popstate', () => broadcastUrl(location.href));
   }
 
-  /* ─────────────────────────────────────────────
-     TOP-LAYER IFRAME MANAGER
-     If running in the top window, listen for
-     navigation messages and recreate the iframe.
-  ───────────────────────────────────────────── */
-  function initTopLayerManager() {
-    if (window !== window.top) return;
-
-    window.addEventListener('message', (e) => {
-      if (!e.data || e.data.type !== '__devMenu_navigate') return;
-      const newUrl = e.data.url;
-      if (!newUrl) return;
-
-      // Find the iframe that sent the message
-      const frames = document.querySelectorAll('iframe');
-      let targetIframe = null;
-
-      for (const f of frames) {
-        try {
-          if (f.contentWindow === e.source) {
-            targetIframe = f;
-            break;
-          }
-        } catch {}
-      }
-
-      if (!targetIframe) return;
-
-      // Clone attributes from old iframe
-      const parent  = targetIframe.parentNode;
-      const nextSib = targetIframe.nextSibling;
-      const attrs   = [...targetIframe.attributes];
-
-      // Remove old
-      targetIframe.remove();
-
-      // Create new
-      const newFrame = document.createElement('iframe');
-      for (const attr of attrs) {
-        if (attr.name !== 'src') newFrame.setAttribute(attr.name, attr.value);
-      }
-      newFrame.src = newUrl;
-
-      // Re-insert in same position
-      if (nextSib) {
-        parent.insertBefore(newFrame, nextSib);
-      } else {
-        parent.appendChild(newFrame);
-      }
-    });
-  }
-
-  /* ─────────────────────────────────────────────
-     INIT
-  ───────────────────────────────────────────── */
   function init() {
     const menu = buildMenu();
     initHoverTrigger(menu);
-    initIframeNavInterceptor();
-    initTopLayerManager();
+    initNavInterceptor();
   }
 
   if (document.body) {
