@@ -4,11 +4,11 @@
 // HOW IT WORKS:
 //   1. Visit google.com/ufeatures  →  page is taken over, shows the full settings UI.
 //   2. Scripts are saved in google.com localStorage (the master list).
-//   3. When you save a script, it ALSO pushes to the target site's own localStorage
-//      via a quick hidden bridge window (open → set → ack → close).
+//   3. When you save/edit/delete/toggle a script, it ALSO pushes to the target
+//      site's own localStorage via a quick hidden bridge window (open → set → close).
 //   4. On EVERY other page load, uFeatures reads THAT site's localStorage and
 //      runs matching scripts. No persistent tab, no bridge needed at runtime.
-//   5. Ctrl+`  →  mini quick-panel on any page (save/run code, link to settings).
+//   5. Ctrl+`  →  opens google.com/ufeatures settings in a new tab.
 //   6. Ctrl+Shift+I  →  Chii remote debugger.
 
 !function(){
@@ -16,8 +16,8 @@
   var SITE_KEY  = "__uFeaturesScripts";   // per-site localStorage key
   var SITES_KEY = "__uFeaturesSites";     // list of known sites (google.com only)
   var chiiState = 0;
-  var _panel    = null;
   var _nameIdx  = 0;
+  var _referrer = document.referrer ? new URL(document.referrer).hostname : "";
 
   var IS_SETTINGS = (
     (location.hostname === "www.google.com" || location.hostname === "google.com") &&
@@ -219,6 +219,9 @@
     var meta = document.createElement("meta"); meta.setAttribute("charset","utf-8"); head.appendChild(meta);
     var vp = document.createElement("meta"); vp.name="viewport"; vp.content="width=device-width,initial-scale=1"; head.appendChild(vp);
     var ti = document.createElement("title"); ti.textContent="uFeatures"; head.appendChild(ti);
+    var fav = document.createElement("link"); fav.rel="icon"; fav.type="image/png";
+    fav.href="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
+    head.appendChild(fav);
     var style = document.createElement("style"); style.textContent = settingsCSS(); head.appendChild(style);
     document.documentElement.appendChild(head);
 
@@ -232,84 +235,78 @@
   function settingsCSS(){
     return [
       "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
-      "html,body{height:100%;background:#1c1b22;color:#d7d7db;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}",
+      "html,body{height:100%;background:#f9f9fb;color:#1c1b22;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}",
       // Layout
       "#uf-wrap{display:flex;flex-direction:column;height:100vh;overflow:hidden}",
       // Topbar
-      "#uf-top{display:flex;align-items:stretch;background:#1c1b22;border-bottom:1px solid #38383d;height:40px;flex-shrink:0}",
-      ".uf-logo{display:flex;align-items:center;gap:8px;padding:0 16px;border-right:1px solid #38383d;font-size:14px;font-weight:600;letter-spacing:-.2px;white-space:nowrap}",
+      "#uf-top{display:flex;align-items:stretch;background:#fff;border-bottom:1px solid #c8c8cc;height:40px;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,.06)}",
+      ".uf-logo{display:flex;align-items:center;gap:8px;padding:0 16px;border-right:1px solid #c8c8cc;font-size:14px;font-weight:600;letter-spacing:-.2px;white-space:nowrap;color:#1c1b22}",
       ".uf-tabs{display:flex;align-items:stretch}",
-      ".uf-tab{display:flex;align-items:center;padding:0 16px;cursor:pointer;font-size:13px;color:#8f8f9d;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .1s,border-color .1s;user-select:none}",
-      ".uf-tab:hover{color:#d7d7db;background:rgba(255,255,255,.04)}",
-      ".uf-tab.on{color:#d7d7db;border-bottom-color:#e66000}",
+      ".uf-tab{display:flex;align-items:center;padding:0 16px;cursor:pointer;font-size:13px;color:#6f6e77;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .1s,border-color .1s;user-select:none}",
+      ".uf-tab:hover{color:#1c1b22;background:rgba(0,0,0,.03)}",
+      ".uf-tab.on{color:#1c1b22;border-bottom-color:#7f0000}",
       ".uf-top-actions{margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 12px}",
       // Content
-      "#uf-body{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#38383d transparent}",
+      "#uf-body{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#c8c8cc transparent}",
       ".uf-sec{display:none}.uf-sec.on{display:block}",
       // Status bar
-      "#uf-bar{height:22px;background:#38383d;display:flex;align-items:center;padding:0 12px;gap:20px;flex-shrink:0}",
-      "#uf-bar span{font-size:11px;color:#8f8f9d}","#uf-bar b{color:#d7d7db;font-weight:400}",
-      "#uf-barst{margin-left:auto;font-size:11px;color:#8f8f9d}",
+      "#uf-bar{height:22px;background:#e0e0e4;display:flex;align-items:center;padding:0 12px;gap:20px;flex-shrink:0}",
+      "#uf-bar span{font-size:11px;color:#6f6e77}","#uf-bar b{color:#1c1b22;font-weight:400}",
+      "#uf-barst{margin-left:auto;font-size:11px;color:#6f6e77}",
       // Buttons
-      ".uf-btn{padding:5px 14px;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #38383d;background:transparent;color:#d7d7db;transition:background .1s,border-color .1s}",
-      ".uf-btn:hover{background:rgba(255,255,255,.06)}",
-      ".uf-btn.prim{background:#e66000;border-color:#e66000;color:#fff}.uf-btn.prim:hover{background:#cc5500;border-color:#cc5500}",
-      ".uf-btn.danger{color:#ff6b6b}.uf-btn.danger:hover{background:rgba(255,100,100,.1);border-color:#ff6b6b}",
+      ".uf-btn{padding:5px 14px;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #c8c8cc;background:#fff;color:#1c1b22;transition:background .1s,border-color .1s}",
+      ".uf-btn:hover{background:#f0f0f4;border-color:#adadb1}",
+      ".uf-btn.prim{background:#7f0000;border-color:#7f0000;color:#fff}.uf-btn.prim:hover{background:#6a0000;border-color:#6a0000}",
+      ".uf-btn.danger{color:#cc0000;border-color:#c8c8cc;background:#fff}.uf-btn.danger:hover{background:#fff0f0;border-color:#cc0000}",
       // Section header
-      ".uf-sh{font-size:11px;font-weight:600;color:#8f8f9d;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #38383d}",
+      ".uf-sh{font-size:11px;font-weight:600;color:#6f6e77;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #c8c8cc}",
       // Card
-      ".uf-card{background:#2a2a2f;border:1px solid #38383d;border-radius:4px;overflow:hidden;margin-bottom:18px}",
-      ".uf-fa{padding:14px 16px;display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #38383d}",
+      ".uf-card{background:#fff;border:1px solid #c8c8cc;border-radius:4px;overflow:hidden;margin-bottom:18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}",
+      ".uf-fa{padding:14px 16px;display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #e0e0e4}",
       ".uf-g2{display:grid;grid-template-columns:1fr 1fr;gap:9px}",
-      ".uf-lbl{font-size:11px;color:#8f8f9d;margin-bottom:3px}",
-      "input.uf-in{border:1px solid #38383d;border-radius:3px;padding:6px 9px;font-family:inherit;font-size:13px;outline:none;color:#d7d7db;background:#1c1b22;width:100%;transition:border-color .12s}",
-      "input.uf-in:focus{border-color:#e66000;box-shadow:0 0 0 1px rgba(230,96,0,.25)}",
-      "textarea.uf-ta{border:1px solid #38383d;border-radius:3px;padding:7px 9px;font-family:Consolas,Menlo,monospace;font-size:12px;outline:none;color:#d7d7db;background:#1c1b22;width:100%;resize:vertical;line-height:1.55;min-height:130px;transition:border-color .12s}",
-      "textarea.uf-ta:focus{border-color:#e66000;box-shadow:0 0 0 1px rgba(230,96,0,.25)}",
+      ".uf-lbl{font-size:11px;color:#6f6e77;margin-bottom:3px}",
+      "input.uf-in{border:1px solid #c8c8cc;border-radius:3px;padding:6px 9px;font-family:inherit;font-size:13px;outline:none;color:#1c1b22;background:#fff;width:100%;transition:border-color .12s}",
+      "input.uf-in:focus{border-color:#7f0000;box-shadow:0 0 0 1px rgba(127,0,0,.2)}",
+      "textarea.uf-ta{border:1px solid #c8c8cc;border-radius:3px;padding:7px 9px;font-family:Consolas,Menlo,monospace;font-size:12px;outline:none;color:#1c1b22;background:#fff;width:100%;resize:vertical;line-height:1.55;min-height:130px;transition:border-color .12s}",
+      "textarea.uf-ta:focus{border-color:#7f0000;box-shadow:0 0 0 1px rgba(127,0,0,.2)}",
       ".uf-ff{display:flex;gap:8px;align-items:center}",
       "#uf-st{flex:1;font-size:11px}",
       // Script list
-      ".uf-srow{display:grid;grid-template-columns:18px 1fr auto auto;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #38383d}",
+      ".uf-srow{display:grid;grid-template-columns:18px 1fr auto auto;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #e0e0e4}",
       ".uf-srow:last-child{border-bottom:none}",
-      ".uf-srow:hover{background:rgba(255,255,255,.025)}",
+      ".uf-srow:hover{background:#f9f9fb}",
       ".uf-sinfo{min-width:0}",
-      ".uf-sname{font-size:13px;color:#d7d7db;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".uf-sname.dim{color:#52525e}",
-      ".uf-sdomain{font-size:11px;color:#8f8f9d}",
-      ".uf-empty{padding:28px;text-align:center;color:#52525e}",
+      ".uf-sname{font-size:13px;color:#1c1b22;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+      ".uf-sname.dim{color:#adadb1}",
+      ".uf-sdomain{font-size:11px;color:#6f6e77}",
+      ".uf-empty{padding:28px;text-align:center;color:#adadb1}",
       // uBlock-style checkbox
       ".uf-cb{position:relative;width:16px;height:16px;flex-shrink:0;cursor:pointer}",
       ".uf-cb input{opacity:0;position:absolute;width:0;height:0}",
-      ".uf-cb .box{position:absolute;inset:0;border:1px solid #4a4a52;border-radius:2px;background:#1c1b22;transition:background .12s,border-color .12s}",
-      ".uf-cb input:checked+.box{background:#e66000;border-color:#e66000}",
+      ".uf-cb .box{position:absolute;inset:0;border:1px solid #adadb1;border-radius:2px;background:#fff;transition:background .12s,border-color .12s}",
+      ".uf-cb input:checked+.box{background:#7f0000;border-color:#7f0000}",
       ".uf-cb input:checked+.box::after{content:'';position:absolute;left:4px;top:1px;width:5px;height:9px;border:2px solid #fff;border-top:none;border-left:none;transform:rotate(45deg)}",
-      // Sites tab
-      ".uf-site-row{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #38383d}",
-      ".uf-site-row:last-child{border-bottom:none}",
-      ".uf-site-name{flex:1;font-size:13px;color:#d7d7db}",
-      ".uf-site-ct{font-size:11px;color:#8f8f9d}",
       // Keys tab
-      ".uf-krow{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid #38383d}",
+      ".uf-krow{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid #e0e0e4}",
       ".uf-krow:last-child{border-bottom:none}",
-      ".uf-kbd{background:#38383d;border:1px solid #4a4a52;border-radius:3px;padding:3px 10px;font-family:monospace;font-size:12px;color:#d7d7db;min-width:170px;text-align:center}",
-      ".uf-kdesc{font-size:12px;color:#8f8f9d}",
-      "code.uf-c{background:#38383d;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px}"
+      ".uf-kbd{background:#f0f0f4;border:1px solid #c8c8cc;border-radius:3px;padding:3px 10px;font-family:monospace;font-size:12px;color:#1c1b22;min-width:170px;text-align:center}",
+      ".uf-kdesc{font-size:12px;color:#6f6e77}",
+      "code.uf-c{background:#f0f0f4;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px;color:#1c1b22}"
     ].join("\n");
   }
 
   function settingsHTML(){
-    var shield = '<svg width="18" height="18" viewBox="0 0 64 64" fill="none"><path d="M32 4L8 14v18c0 14 10.7 26.5 24 30 13.3-3.5 24-16 24-30V14L32 4z" fill="#e66000"/><path d="M32 10L12 18.5v13.5c0 10.5 8 19.8 20 22.8 12-3 20-12.3 20-22.8V18.5L32 10z" fill="#cc5500"/><path d="M26 32l-5-5-2.5 2.5 7.5 7.5 13-13L36.5 21.5z" fill="#fff"/></svg>';
+    var iconUrl = "https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
     return '<div id="uf-wrap">'
       // Top
       +'<div id="uf-top">'
-        +'<div class="uf-logo">'+shield+'uFeatures</div>'
+        +'<div class="uf-logo"><img src="'+iconUrl+'" width="20" height="20" style="object-fit:contain">uFeatures</div>'
         +'<div class="uf-tabs">'
           +'<div class="uf-tab on" data-tab="scripts">My Scripts</div>'
-          +'<div class="uf-tab" data-tab="sites">Hosted Sites</div>'
           +'<div class="uf-tab" data-tab="keys">Shortcuts</div>'
         +'</div>'
         +'<div class="uf-top-actions">'
-          +'<button class="uf-btn prim" id="uf-apply">&#10003; Apply &amp; Re-push all</button>'
+          +'<button class="uf-btn" id="uf-update" title="Re-push all scripts to all tracked sites">&#8635; Update all sites</button>'
         +'</div>'
       +'</div>'
 
@@ -321,42 +318,26 @@
           +'<div class="uf-sh">Add / Edit Script</div>'
           +'<div class="uf-card"><div class="uf-fa">'
             +'<div class="uf-g2">'
-              +'<div><div class="uf-lbl">Script name</div><input id="uf-nameF" class="uf-in" type="text" placeholder="Example Script"></div>'
-              +'<div><div class="uf-lbl">Target domain (blank = all sites)</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com or *.example.com/path"></div>'
+              +'<div><div class="uf-lbl">Script name</div><input id="uf-nameF" class="uf-in" type="text" value="Example Script"></div>'
+              +'<div><div class="uf-lbl">Target domain (blank = all sites)</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com"></div>'
             +'</div>'
             +'<div><div class="uf-lbl">JavaScript</div><textarea id="uf-codeF" class="uf-ta" placeholder="// Your script here..."></textarea></div>'
           +'</div>'
-          +'<div class="uf-ff" style="padding:10px 16px;background:#222226;border-top:1px solid #38383d">'
+          +'<div class="uf-ff" style="padding:10px 16px;background:#f0f0f4;border-top:1px solid #c8c8cc">'
             +'<span id="uf-st"></span>'
-            +'<button class="uf-btn" id="uf-runBtn">Run on this page</button>'
-            +'<button class="uf-btn prim" id="uf-saveBtn">Save &amp; Push to site</button>'
+            +'<button class="uf-btn prim" id="uf-saveBtn">Save script</button>'
           +'</div></div>'
           +'<div class="uf-sh" style="margin-top:20px">Saved Scripts</div>'
           +'<div class="uf-card" id="uf-slist"></div>'
-        +'</div>'
-
-        // Sites
-        +'<div class="uf-sec" id="uf-tab-sites">'
-          +'<div class="uf-sh">Sites with uFeatures scripts</div>'
-          +'<div class="uf-card" id="uf-sitelist"></div>'
-          +'<div style="margin-top:18px"><div class="uf-sh">Push all scripts to a site</div>'
-          +'<div class="uf-card"><div class="uf-fa">'
-            +'<div class="uf-g2">'
-              +'<div><div class="uf-lbl">Target origin</div><input id="uf-pushUrl" class="uf-in" placeholder="https://example.com"></div>'
-              +'<div style="display:flex;align-items:flex-end"><button class="uf-btn prim" id="uf-pushBtn">Push all scripts</button></div>'
-            +'</div>'
-            +'<div style="font-size:11px;color:#52525e;line-height:1.7">Opens a brief hidden window to the target, writes matching scripts into its localStorage, then closes. The target site must have uFeatures.js injected.</div>'
-          +'</div></div></div>'
         +'</div>'
 
         // Keys
         +'<div class="uf-sec" id="uf-tab-keys">'
           +'<div class="uf-sh">Keyboard Shortcuts</div>'
           +'<div class="uf-card">'
-            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + `</span><span class="uf-kdesc">Open mini quick-panel on any page</span></div>'
+            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + `</span><span class="uf-kdesc">Open uFeatures settings in a new tab</span></div>'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + Shift + I</span><span class="uf-kdesc">Toggle Chii remote debugger</span></div>'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + V</span><span class="uf-kdesc">Run a <code class="uf-c">javascript:</code> bookmarklet from clipboard (outside text fields)</span></div>'
-            +'<div class="uf-krow"><span class="uf-kbd">Esc</span><span class="uf-kdesc">Close the quick-panel</span></div>'
           +'</div>'
         +'</div>'
 
@@ -420,6 +401,7 @@
       cb.onchange=(function(idx,nmEl){ return function(){
         var a=siteLoad(); a[idx].enabled=this.checked; siteSave(a);
         nmEl.className="uf-sname"+(this.checked?"":" dim"); updateBar();
+        pushForDomain(a[idx].domain, a);
       }; })(i,nm);
 
       // Edit
@@ -440,11 +422,12 @@
 
       // Delete
       var db=document.createElement("button"); db.className="uf-btn danger"; db.textContent="Delete";
-      db.onclick=(function(idx,name){ return function(){
+      db.onclick=(function(idx,name,domain){ return function(){
         if(!confirm("Delete \""+name+"\"?")) return;
         var a=siteLoad(); a.splice(idx,1); siteSave(a);
         renderScripts(); updateBar();
-      }; })(i,s.name);
+        pushForDomain(domain, a);
+      }; })(i,s.name,s.domain);
 
       row.appendChild(lbl); row.appendChild(info); row.appendChild(eb); row.appendChild(db);
       c.appendChild(row);
@@ -481,6 +464,10 @@
   }
 
   function wireSettings(){
+    // Auto-fill domain from referrer (the site that opened settings)
+    var domF = document.getElementById("uf-domF");
+    if(_referrer) domF.value = _referrer;
+
     // Tabs
     document.querySelectorAll(".uf-tab").forEach(function(tab){
       tab.addEventListener("click", function(){
@@ -488,16 +475,16 @@
         document.querySelectorAll(".uf-sec").forEach(function(s){ s.classList.remove("on"); });
         tab.classList.add("on");
         var sec=document.getElementById("uf-tab-"+tab.getAttribute("data-tab"));
-        if(sec){ sec.classList.add("on"); if(tab.getAttribute("data-tab")==="sites") renderSites(); }
+        if(sec) sec.classList.add("on");
       });
     });
 
-    // Save & Push
+    // Save script
     document.getElementById("uf-saveBtn").addEventListener("click", function(){
-      var name=(document.getElementById("uf-nameF").value.trim())||nextName();
+      var name=(document.getElementById("uf-nameF").value.trim())||"Example Script";
       var domain=document.getElementById("uf-domF").value.trim();
       var code=document.getElementById("uf-codeF").value.trim();
-      if(!code){ setSt("Code is required.","#ff6b6b"); return; }
+      if(!code){ setSt("Code is required.","#cc0000"); return; }
 
       var arr=siteLoad();
       var idx=-1;
@@ -507,148 +494,42 @@
       siteSave(arr);
       _editingName=null;
       renderScripts(); updateBar();
+      pushForDomain(domain, arr);
 
-      // Push to the target site's localStorage
-      if(!domain){
-        setSt("Saved. (No specific domain — push manually via Hosted Sites.)","#8f8f9d");
-      } else {
-        // Derive origin from domain
-        var rawDomain=domain.split(",")[0].trim().replace(/^\*\./,"");
-        var slash=rawDomain.indexOf("/"); if(slash!==-1) rawDomain=rawDomain.slice(0,slash);
-        // Check if we already know the origin scheme
-        var known=getSites().filter(function(o){ return o.indexOf(rawDomain)!==-1; });
-        var origins=known.length ? known : ["https://"+rawDomain];
-        origins.forEach(function(origin){
-          addSite(origin);
-          var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
-          pushToSite(origin, toSend, function(){ setSt("Saved & pushed \u2713","#3fc33f"); updateBar(); });
-        });
-        setSt("Saving & pushing…","#e66000");
-      }
-
-      document.getElementById("uf-nameF").value="";
+      document.getElementById("uf-nameF").value="Example Script";
       document.getElementById("uf-codeF").value="";
     });
 
-    // Run on this page
-    document.getElementById("uf-runBtn").addEventListener("click", function(){
-      var code=document.getElementById("uf-codeF").value.trim(); if(!code) return;
-      try{ Function(code)(); setSt("Ran \u2713","#3fc33f"); }
-      catch(e){ setSt("Error: "+e.message,"#ff6b6b"); }
-    });
-
-    // Apply & re-push all
-    document.getElementById("uf-apply").addEventListener("click", function(){
+    // Update all sites button
+    document.getElementById("uf-update").addEventListener("click", function(){
       var sites=getSites(), scripts=siteLoad();
-      if(!sites.length){ setSt("No tracked sites to push to.","#8f8f9d"); return; }
+      if(!sites.length){ setSt("No tracked sites.","#6f6e77"); return; }
       var rem=sites.length;
-      setSt("Pushing to "+rem+" site(s)…","#e66000");
+      setSt("Updating "+rem+" site(s)…","#6f6e77");
       sites.forEach(function(origin){
         var toSend=scripts.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
-        pushToSite(origin,toSend,function(){ rem--; if(rem<=0) setSt("All sites updated \u2713","#3fc33f"); });
+        pushToSite(origin,toSend,function(){ rem--; if(rem<=0) setSt("All sites updated \u2713","green"); });
       });
     });
 
-    // Manual push to URL
-    document.getElementById("uf-pushBtn").addEventListener("click", function(){
-      var url=document.getElementById("uf-pushUrl").value.trim();
-      if(!url){ setSt("Enter a URL.","#ff6b6b"); return; }
-      try{
-        var origin=new URL(url).origin;
-        var scripts=siteLoad();
-        addSite(origin); renderSites(); updateBar();
-        pushToSite(origin,scripts,function(){ setSt("Pushed to "+origin+" \u2713","#3fc33f"); });
-        setSt("Pushing…","#e66000");
-      }catch(e){ setSt("Invalid URL","#ff6b6b"); }
-    });
-
-    renderScripts(); renderSites(); updateBar();
+    renderScripts(); updateBar();
   }
 
-  // ════════════════════════════════════════════════════════════════════
-  // MINI QUICK-PANEL  —  Ctrl+` on any non-settings page
-  // ════════════════════════════════════════════════════════════════════
-
-  function openPanel(){
-    if(_panel){
-      _panel.style.display = _panel.style.display==="none" ? "flex" : "none";
-      return;
-    }
-
-    var style=document.createElement("style"); style.id="__uf_pstyle";
-    style.textContent=[
-      "#__ufP{position:fixed;bottom:18px;right:18px;width:340px;background:#1c1b22;border:1px solid #38383d;border-radius:5px;box-shadow:0 8px 40px rgba(0,0,0,.75);z-index:2147483647;display:flex;flex-direction:column;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;color:#d7d7db;animation:__ufIn .12s ease}",
-      "@keyframes __ufIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
-      "#__ufP .ph{display:flex;align-items:center;gap:8px;padding:9px 12px;background:#2a2a2f;border-bottom:1px solid #38383d;user-select:none}",
-      "#__ufP .ph .pt{flex:1;font-size:13px;font-weight:600}",
-      "#__ufP .ph .px{background:none;border:none;color:#8f8f9d;font-size:19px;cursor:pointer;padding:0;line-height:1;transition:color .1s}",
-      "#__ufP .ph .px:hover{color:#d7d7db}",
-      "#__ufP .pb{padding:10px 12px;display:flex;flex-direction:column;gap:8px}",
-      "#__ufP input.pi{border:1px solid #38383d;border-radius:3px;padding:6px 8px;font-size:12px;font-family:inherit;outline:none;color:#d7d7db;background:#1c1b22;width:100%;transition:border-color .12s}",
-      "#__ufP input.pi:focus{border-color:#e66000}",
-      "#__ufP textarea.pt2{border:1px solid #38383d;border-radius:3px;padding:6px 8px;font-family:monospace;font-size:12px;outline:none;color:#d7d7db;background:#1c1b22;width:100%;resize:vertical;line-height:1.5;transition:border-color .12s}",
-      "#__ufP textarea.pt2:focus{border-color:#e66000}",
-      "#__ufP .pr{display:flex;gap:6px;align-items:center}",
-      "#__ufP button.pbt{padding:5px 12px;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #38383d;background:transparent;color:#d7d7db;transition:background .1s}",
-      "#__ufP button.pbt:hover{background:rgba(255,255,255,.06)}",
-      "#__ufP button.pbt.pp{background:#e66000;border-color:#e66000;color:#fff}.pbt.pp:hover{background:#cc5500}",
-      "#__ufP .pst{flex:1;font-size:11px;text-align:right}",
-      "#__ufP a.plink{display:flex;align-items:center;gap:6px;padding:7px 12px;border-top:1px solid #38383d;font-size:11px;color:#8f8f9d;text-decoration:none;transition:background .1s,color .1s}",
-      "#__ufP a.plink:hover{background:rgba(255,255,255,.04);color:#d7d7db}"
-    ].join("\n");
-    document.head.appendChild(style);
-
-    var shield='<svg width="13" height="13" viewBox="0 0 64 64" fill="none"><path d="M32 4L8 14v18c0 14 10.7 26.5 24 30 13.3-3.5 24-16 24-30V14L32 4z" fill="#e66000"/><path d="M26 32l-5-5-2.5 2.5 7.5 7.5 13-13L36.5 21.5z" fill="#fff"/></svg>';
-
-    _panel=document.createElement("div"); _panel.id="__ufP";
-    _panel.innerHTML=
-      '<div class="ph">'+shield+'<span class="pt">uFeatures</span><button class="px" id="__ufX">&times;</button></div>'
-      +'<div class="pb">'
-        +'<input id="__ufN" class="pi" type="text" placeholder="Script name (e.g. Example Script)">'
-        +'<textarea id="__ufC" class="pt2" rows="5" placeholder="// JavaScript to run on this page..."></textarea>'
-        +'<div class="pr">'
-          +'<button class="pbt" id="__ufRun">Run</button>'
-          +'<button class="pbt pp" id="__ufSave">Save &amp; Push</button>'
-          +'<span class="pst" id="__ufSt"></span>'
-        +'</div>'
-      +'</div>'
-      +'<a class="plink" href="https://www.google.com/ufeatures" target="_blank">'+shield+' Open uFeatures Settings &rarr;</a>';
-
-    document.body.appendChild(_panel);
-
-    document.getElementById("__ufX").addEventListener("click",function(){ _panel.style.display="none"; });
-
-    document.getElementById("__ufRun").addEventListener("click",function(){
-      var code=document.getElementById("__ufC").value.trim(); if(!code) return;
-      try{ Function(code)(); pst("Ran \u2713","#3fc33f"); }
-      catch(e){ pst("Error: "+e.message,"#ff6b6b"); }
+  // Helper: derive origin from domain string and push
+  function pushForDomain(domain, arr){
+    if(!domain){ setSt("Saved.","#6f6e77"); return; }
+    var rawDomain=domain.split(",")[0].trim().replace(/^\*\./,"");
+    var slash=rawDomain.indexOf("/"); if(slash!==-1) rawDomain=rawDomain.slice(0,slash);
+    if(!rawDomain){ setSt("Saved.","#6f6e77"); return; }
+    var known=getSites().filter(function(o){ return o.indexOf(rawDomain)!==-1; });
+    var origins=known.length ? known : ["https://"+rawDomain];
+    var rem=origins.length;
+    setSt("Saving & pushing…","#6f6e77");
+    origins.forEach(function(origin){
+      addSite(origin); updateBar();
+      var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
+      pushToSite(origin,toSend,function(){ rem--; if(rem<=0) setSt("Saved & pushed \u2713","green"); });
     });
-
-    document.getElementById("__ufSave").addEventListener("click",function(){
-      var name=(document.getElementById("__ufN").value.trim())||nextName();
-      var code=document.getElementById("__ufC").value.trim();
-      var domain=location.hostname;
-      if(!code){ pst("Code required","#ff6b6b"); return; }
-
-      // Save to this site's localStorage
-      var arr=siteLoad();
-      var idx=-1; arr.forEach(function(s,i){ if(s.name===name) idx=i; });
-      var entry={name:name,domain:domain,code:code,enabled:true};
-      if(idx>=0) arr[idx]=entry; else arr.push(entry);
-      siteSave(arr);
-      // Run it immediately
-      try{ Function(code)(); }catch(e){}
-
-      // Also push this site's scripts to google.com so settings page stays in sync
-      pushToSite("https://www.google.com", arr, function(){ pst("Saved \u2713","#3fc33f"); });
-      pst("Saving…","#e66000");
-    });
-  }
-
-  function pst(msg,color){
-    var el=_panel&&_panel.querySelector("#__ufSt"); if(!el) return;
-    el.textContent=msg; el.style.color=color||"#8f8f9d";
-    if(msg) setTimeout(function(){ if(el.textContent===msg) el.textContent=""; },2500);
   }
 
   // ── Boot ─────────────────────────────────────────────────────────
@@ -669,16 +550,13 @@
     var tag=(document.activeElement||{}).tagName;
     var typing=tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT";
 
-    if(e.key==="Escape"&&_panel&&_panel.style.display!=="none"){
-      _panel.style.display="none"; return;
-    }
     if(e.ctrlKey&&e.shiftKey&&!e.altKey&&e.key==="I"){
       if(typing) return; e.preventDefault(); injectChii(); return;
     }
     if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&e.code==="Backquote"){
       e.preventDefault();
-      if(IS_SETTINGS) return; // already on settings
-      openPanel(); return;
+      if(!IS_SETTINGS) window.open("https://www.google.com/ufeatures","_blank");
+      return;
     }
     if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&e.key==="v"){
       if(typing) return;
