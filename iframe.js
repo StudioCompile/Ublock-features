@@ -6,639 +6,558 @@
 
   const IS_IFRAME = window !== window.top;
 
-  /* ═══════════════════════════════════════════════════════════════
-     SHARED HELPERS
-  ═══════════════════════════════════════════════════════════════ */
   function escHtml(s) {
-    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  /* ═══════════════════════════════════════════════════════════════
-     IFRAME SIDE
-     - Intercepts all link clicks & form submits → postMessage to host
-     - Intercepts SPA pushState/replaceState → postMessage to host
-     No UI rendered here at all.
-  ═══════════════════════════════════════════════════════════════ */
-  if (IS_IFRAME) {
-    function sendNav(url) {
+  /* ════════════════════════════════════════════════════════
+     HOST PAGE — error detection & blocked page injection
+     The bar/UI lives inside the iframe, not here.
+  ════════════════════════════════════════════════════════ */
+  if (!IS_IFRAME) {
+
+    function findFrameByWindow(win) {
+      for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentWindow === win) return f; } catch {}
+      }
+      return null;
+    }
+
+    // Called after an iframe loads — checks if Chrome navigated
+    // to a blocked/error chrome:// URL we can't inject into
+    function checkFrameAfterLoad(frame) {
+      let href = '';
       try {
-        let resolved = new URL(url, location.href).href;
-        window.top.postMessage({ type: '__ifm_navigate', url: resolved }, '*');
-      } catch {}
+        href = frame.contentWindow.location.href;
+      } catch {
+        // Cross-origin but loaded fine — do nothing
+        return;
+      }
+
+      // Chrome error pages land on chrome-error:// or about:blank after a block
+      // We also check for the #main-frame-error element on same-origin error pages
+      let isBlocked = false;
+      let doc = null;
+      try { doc = frame.contentDocument; } catch {}
+
+      if (href.startsWith('chrome-error://') || href.startsWith('chrome://')) {
+        isBlocked = true;
+      } else if (doc && doc.getElementById('main-frame-error')) {
+        isBlocked = true;
+      }
+
+      if (isBlocked) {
+        const attempted = frame.__ifmPendingUrl || frame.getAttribute('src') || href;
+        injectBlockedPage(frame, attempted);
+      }
     }
 
-    function sendUrlChange(url) {
-      try { window.top.postMessage({ type: '__ifm_urlChange', url }, '*'); } catch {}
-    }
-
-    // Intercept link clicks
-    document.addEventListener('click', (e) => {
-      const a = e.composedPath().find(n => n && n.tagName === 'A');
-      if (!a) return;
-      const href = a.getAttribute('href');
-      if (!href || href.startsWith('#') || href.startsWith('javascript')) return;
-      // Let target=_blank open normally
-      if (a.target === '_blank') return;
-      e.preventDefault();
-      e.stopPropagation();
-      sendNav(href);
-    }, true);
-
-    // Intercept form submits
-    document.addEventListener('submit', (e) => {
-      const action = e.target.getAttribute('action') || location.href;
-      e.preventDefault();
-      sendNav(action);
-    }, true);
-
-    // SPA navigation
-    const _wrap = (orig) => function (...args) {
-      const r = orig.apply(this, args);
-      sendUrlChange(location.href);
-      return r;
-    };
-    history.pushState    = _wrap(history.pushState);
-    history.replaceState = _wrap(history.replaceState);
-    window.addEventListener('popstate', () => sendUrlChange(location.href));
-
-    // Broadcast initial URL
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => sendUrlChange(location.href));
-    } else {
-      sendUrlChange(location.href);
-    }
-
-    return; // nothing else for iframe side
-  }
-
-  /* ═══════════════════════════════════════════════════════════════
-     HOST PAGE SIDE
-     - Receives navigate / urlChange messages from iframes
-     - Preflight-checks URLs before loading
-     - Recreates iframe with new src (host can observe src)
-     - Custom blocked page with Go back
-     - Discrete bottom-right corner bar with back/fwd/url/copy/go
-  ═══════════════════════════════════════════════════════════════ */
-
-  /* ── Per-iframe state store ────────────────────────────────── */
-  // Keyed by a generated ID stamped on each iframe element
-  const iframeState = new Map();
-  let _ifmIdCounter = 0;
-
-  function getState(frame) {
-    if (!frame.__ifmId) {
-      frame.__ifmId = ++_ifmIdCounter;
-      iframeState.set(frame.__ifmId, {
-        history: [],   // past URLs
-        future:  [],   // forward URLs
-        current: frame.getAttribute('src') || null,
+    function watchFrame(frame) {
+      if (frame.__ifmHostWatched) return;
+      frame.__ifmHostWatched = true;
+      frame.addEventListener('load', () => {
+        setTimeout(() => checkFrameAfterLoad(frame), 60);
       });
     }
-    return iframeState.get(frame.__ifmId);
-  }
 
-  function findFrameByWindow(win) {
-    for (const f of document.querySelectorAll('iframe')) {
-      try { if (f.contentWindow === win) return f; } catch {}
-    }
-    return null;
-  }
-
-  /* ── Preflight ─────────────────────────────────────────────── */
-  async function preflightCheck(url) {
-    // Step 1: no-cors ping — if network error → unreachable
-    try {
-      await fetch(url, { method: 'HEAD', mode: 'no-cors', signal: AbortSignal.timeout(6000) });
-    } catch (e) {
-      return 'error';
-    }
-
-    // Step 2: cors fetch to read X-Frame-Options / CSP headers
-    try {
-      const res = await fetch(url, { method: 'HEAD', mode: 'cors', signal: AbortSignal.timeout(6000) });
-      const xfo = res.headers.get('x-frame-options');
-      const csp = res.headers.get('content-security-policy');
-      if (xfo) {
-        const v = xfo.trim().toUpperCase();
-        if (v === 'DENY' || v === 'SAMEORIGIN') return 'blocked';
-      }
-      if (csp) {
-        const m = csp.match(/frame-ancestors\s+([^;]+)/i);
-        if (m) {
-          const val = m[1].trim();
-          if (val === "'none'" || val === "'self'") return 'blocked';
+    // Watch src attribute changes to track pending URL
+    const srcObs = new MutationObserver(muts => {
+      for (const m of muts) {
+        if (m.type !== 'attributes' || m.target.tagName !== 'IFRAME') continue;
+        const src = m.target.getAttribute('src');
+        if (src && src !== 'about:blank') {
+          m.target.__ifmPendingUrl = src;
         }
       }
-      return 'ok';
-    } catch {
-      // CORS rejected — can't read headers, but no-cors succeeded so site is up.
-      // Fall back to letting it load and checking post-load.
-      return 'unknown';
-    }
-  }
+    });
+    srcObs.observe(document.documentElement, {
+      attributes: true, attributeFilter: ['src'], subtree: true
+    });
 
-  /* ── Navigate an iframe ────────────────────────────────────── */
-  async function navigateIframe(frame, newUrl, pushHistory = true) {
-    const state = getState(frame);
-    const prev = state.current;
+    // Watch for new iframes
+    const domObs = new MutationObserver(muts => {
+      for (const m of muts) m.addedNodes.forEach(n => {
+        if (n.nodeType !== 1) return;
+        if (n.tagName === 'IFRAME') watchFrame(n);
+        n.querySelectorAll && n.querySelectorAll('iframe').forEach(watchFrame);
+      });
+    });
+    domObs.observe(document.documentElement, { childList: true, subtree: true });
+    document.querySelectorAll('iframe').forEach(watchFrame);
 
-    if (pushHistory && prev && prev !== newUrl) {
-      state.history.push(prev);
-      state.future = []; // clear forward stack
-    }
-    state.current = newUrl;
-    updateBar();
+    // Messages from inside the iframe
+    window.addEventListener('message', e => {
+      if (!e.data || typeof e.data !== 'object') return;
 
-    showLoading(frame, newUrl);
-    const status = await preflightCheck(newUrl);
+      // iframe requests navigation (link click intercepted inside)
+      if (e.data.type === '__ifm_navigate') {
+        const frame = findFrameByWindow(e.source);
+        if (!frame) return;
+        const url = e.data.url;
+        frame.__ifmPendingUrl = url;
+        frame.src = url;
+        // update src attr so observers can track it
+      }
 
-    if (status === 'blocked' || status === 'error') {
-      injectBlockedPage(frame, newUrl, status);
-      return;
-    }
+      // Go back from blocked page
+      if (e.data.type === '__ifm_goback') {
+        const frame = findFrameByWindow(e.source);
+        if (!frame) return;
+        const hist = frame.__ifmBackStack || [];
+        const prev = hist.pop();
+        frame.__ifmBackStack = hist;
+        if (prev && prev !== 'about:srcdoc' && !prev.startsWith('data:')) {
+          frame.__ifmPendingUrl = prev;
+          frame.removeAttribute('srcdoc');
+          frame.src = prev;
+        }
+      }
 
-    // Set src — stamp __ifmLastSrc so our own srcObserver skips it
-    frame.__ifmLastSrc = newUrl;
-    frame.removeAttribute('srcdoc');
-    frame.src = newUrl;
-  }
-
-  function goBack(frame) {
-    const state = getState(frame);
-    if (!state.history.length) return;
-    const prev = state.history.pop();
-    if (state.current) state.future.unshift(state.current);
-    state.current = prev;
-    updateBar();
-    showLoading(frame, prev);
-    preflightCheck(prev).then(status => {
-      if (status === 'blocked' || status === 'error') {
-        injectBlockedPage(frame, prev, status);
-      } else {
-        frame.__ifmLastSrc = prev;
-        frame.removeAttribute('srcdoc');
-        frame.src = prev;
+      // iframe telling us its current real URL (for src tracking)
+      if (e.data.type === '__ifm_seturl') {
+        const frame = findFrameByWindow(e.source);
+        if (!frame) return;
+        // Push old src to back stack before updating
+        const old = frame.__ifmPendingUrl || frame.getAttribute('src');
+        if (old && old !== 'about:blank' && old !== e.data.url) {
+          if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
+          frame.__ifmBackStack.push(old);
+        }
+        frame.__ifmPendingUrl = e.data.url;
+        // Update the actual src attribute so host page JS can read it
+        frame.setAttribute('src', e.data.url);
       }
     });
-  }
 
-  function goForward(frame) {
-    const state = getState(frame);
-    if (!state.future.length) return;
-    const next = state.future.shift();
-    if (state.current) state.history.push(state.current);
-    state.current = next;
-    updateBar();
-    showLoading(frame, next);
-    preflightCheck(next).then(status => {
-      if (status === 'blocked' || status === 'error') {
-        injectBlockedPage(frame, next, status);
-      } else {
-        frame.__ifmLastSrc = next;
-        frame.removeAttribute('srcdoc');
-        frame.src = next;
+    function injectBlockedPage(frame, blockedUrl) {
+      const safeUrl = escHtml(blockedUrl || '');
+      frame.__ifmLastBlockedUrl = blockedUrl;
+      // Push to back stack
+      if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
+      const prev = frame.__ifmPendingUrl || frame.getAttribute('src') || '';
+      if (prev && prev !== blockedUrl && prev !== 'about:srcdoc' && !prev.startsWith('data:')) {
+        frame.__ifmBackStack.push(prev);
       }
-    });
-  }
 
-  /* ── Loading page ──────────────────────────────────────────── */
-  function showLoading(frame, url) {
-    frame.removeAttribute('src');
-    frame.srcdoc = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>*{margin:0;padding:0;box-sizing:border-box}
-body{height:100vh;display:flex;align-items:center;justify-content:center;
-background:#f5f5f7;font-family:-apple-system,'Segoe UI',system-ui,sans-serif}
-.w{text-align:center;color:#aaa}
-.sp{width:28px;height:28px;border:2.5px solid #e0e0e0;border-top-color:#bbb;
-border-radius:50%;animation:sp .7s linear infinite;margin:0 auto 12px}
-@keyframes sp{to{transform:rotate(360deg)}}
-.u{font-size:10.5px;margin-top:6px;word-break:break-all;max-width:300px;color:#ccc}
-</style></head><body>
-<div class="w"><div class="sp"></div><div style="font-size:13px">Loading</div>
-<div class="u">${escHtml(url)}</div></div></body></html>`;
-  }
+      frame.removeAttribute('src');
+      frame.srcdoc = buildBlockedPage(safeUrl);
+    }
 
-  /* ── Blocked page ──────────────────────────────────────────── */
-  function injectBlockedPage(frame, blockedUrl, reason) {
-    const msg = reason === 'error'
-      ? "This site couldn't be reached. It may be down or the address is wrong."
-      : "This site has blocked iframe embedding or refused the connection.";
-    frame.removeAttribute('src');
-    frame.__ifmLastSrc = null;
-    frame.srcdoc = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8">
+    function buildBlockedPage(safeUrl) {
+      return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<title>This site can't be reached</title>
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;background:#f5f5f7;display:flex;align-items:center;
-  justify-content:center;font-family:-apple-system,'Segoe UI',system-ui,sans-serif}
-.card{background:#fff;border:1px solid #e0e0e3;border-radius:18px;
-  box-shadow:0 2px 24px rgba(0,0,0,0.08);padding:44px 40px 36px;
-  max-width:400px;width:92%;text-align:center}
-.badge{width:56px;height:56px;background:#fff2f2;border-radius:50%;
-  display:flex;align-items:center;justify-content:center;margin:0 auto 22px;
-  border:1.5px solid #ffd0d0}
-.badge svg{width:26px;height:26px;stroke:#d94f4f;fill:none;stroke-width:2;
-  stroke-linecap:round;stroke-linejoin:round}
-h1{font-size:18px;font-weight:700;color:#111;margin-bottom:6px;letter-spacing:-.02em}
-.up{font-size:11px;color:#888;background:#f2f2f4;border-radius:20px;
-  padding:4px 12px;margin:10px 0 18px;display:inline-block;
-  max-width:100%;word-break:break-all;line-height:1.5}
-p{font-size:13px;color:#555;line-height:1.65;margin-bottom:28px}
-.btn{display:inline-flex;align-items:center;gap:7px;background:#111;color:#fff;
-  border:none;border-radius:10px;padding:11px 24px;font-size:13px;font-weight:500;
-  cursor:pointer;transition:opacity .15s,transform .1s}
-.btn:hover{opacity:.82;transform:translateY(-1px)}
-.btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.3;
-  stroke-linecap:round;stroke-linejoin:round}
-</style></head><body>
-<div class="card">
-  <div class="badge">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/>
-    <line x1="12" y1="8" x2="12" y2="12"/>
-    <circle cx="12" cy="16" r=".6" fill="#d94f4f" stroke="none"/></svg>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #fff;
+    color: #202124;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 40px 20px;
+    gap: 0;
+  }
+  .branding {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    opacity: 0.45;
+  }
+  .branding img { width: 18px; height: 18px; border-radius: 4px; }
+  .branding span { font-size: 11px; color: #777; font-weight: 500; letter-spacing: .02em; }
+  .icon-wrap {
+    width: 72px; height: 72px;
+    background: #f1f3f4;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 24px;
+  }
+  .icon-wrap svg { width: 36px; height: 36px; color: #80868b; }
+  h1 {
+    font-size: 22px;
+    font-weight: 400;
+    color: #202124;
+    margin-bottom: 8px;
+    text-align: center;
+  }
+  .url-line {
+    font-size: 12px;
+    color: #5f6368;
+    margin-bottom: 28px;
+    text-align: center;
+    max-width: 420px;
+    word-break: break-all;
+  }
+  .msg {
+    font-size: 13px;
+    color: #5f6368;
+    max-width: 420px;
+    text-align: center;
+    line-height: 1.6;
+    margin-bottom: 32px;
+  }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .btn {
+    font-size: 13px;
+    font-weight: 500;
+    border: none;
+    border-radius: 4px;
+    padding: 9px 20px;
+    cursor: pointer;
+    transition: box-shadow .15s, background .15s;
+  }
+  .btn-primary {
+    background: #1a73e8;
+    color: #fff;
+  }
+  .btn-primary:hover { background: #1765cc; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+  .btn-secondary {
+    background: #f1f3f4;
+    color: #202124;
+  }
+  .btn-secondary:hover { background: #e8eaed; }
+  .error-code {
+    margin-top: 40px;
+    font-size: 11px;
+    color: #bdc1c6;
+    letter-spacing: .03em;
+  }
+</style>
+</head>
+<body>
+  <div class="icon-wrap">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="8" x2="12" y2="12"/>
+      <line x1="12" y1="16" x2="12.01" y2="16" stroke-width="2.5"/>
+    </svg>
   </div>
-  <h1>Can't open this page</h1>
-  <div class="up">${escHtml(blockedUrl)}</div>
-  <p>${msg}</p>
-  <button class="btn" onclick="window.parent.postMessage({type:'__ifm_back'},'*')">
-    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-    Go back
-  </button>
-</div></body></html>`;
+  <h1>This site can't be reached</h1>
+  <div class="url-line">${safeUrl}</div>
+  <div class="msg">
+    This site refused to connect or has blocked embedding in frames.<br>
+    ERR_BLOCKED_BY_RESPONSE
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-secondary" onclick="window.parent.postMessage({type:'__ifm_goback'},'*')">Back</button>
+    <button class="btn btn-primary" onclick="window.parent.postMessage({type:'__ifm_navigate',url:'${safeUrl}'},'*')">Try again</button>
+  </div>
+  <div class="error-code">uFeatures Embedded Browser</div>
+  <div class="branding">
+    <img src="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png" alt="">
+    <span>uFeatures</span>
+  </div>
+</body>
+</html>`;
+    }
+
+    return; // host page done
   }
 
-  /* ── Post-load check (fallback for 'unknown' preflight) ────── */
-  function checkPostLoad(frame) {
-    const pending = frame.__ifmPendingUrl;
-    frame.__ifmPendingUrl = null;
-    let doc, href;
-    try { doc = frame.contentDocument; href = frame.contentWindow.location.href; } catch { return; }
-    if (!doc) return;
-    if ((href && href.startsWith('chrome-error://')) || doc.getElementById('main-frame-error')) {
-      injectBlockedPage(frame, pending || frame.__ifmLastSrc || '', 'blocked');
-    }
+  /* ════════════════════════════════════════════════════════
+     IFRAME SIDE
+     - Bottom-right corner bar (thin, chrome-style)
+     - Intercepts all link clicks → same iframe or new tab (Ctrl)
+     - Back / Forward stacks
+     - URL input: navigate on Enter, supports bookmarklets
+     - Google button
+     - Broadcasts URL changes to host
+  ════════════════════════════════════════════════════════ */
+
+  /* ── History state (per iframe instance) ── */
+  const _hist = [];   // back stack  (URLs already visited)
+  const _fwd  = [];   // forward stack
+  let   _cur  = location.href;
+
+  function pushHistory(url) {
+    if (!url || url === _cur) return;
+    // Don't push srcdoc/blob/data URLs
+    if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) return;
+    _hist.push(_cur);
+    _fwd.length = 0;
+    _cur = url;
+    tellHost(_cur);
+    updateBar();
   }
 
-  /* ── Watch iframes ─────────────────────────────────────────── */
-  function watchIframe(frame) {
-    if (frame.__ifmWatched) return;
-    frame.__ifmWatched = true;
-    getState(frame); // init state, capture initial src
-    frame.addEventListener('load', () => setTimeout(() => checkPostLoad(frame), 80));
+  function tellHost(url) {
+    try { window.top.postMessage({ type: '__ifm_seturl', url }, '*'); } catch {}
   }
 
-  // Intercept src attribute changes set by host page code
-  const srcObserver = new MutationObserver((muts) => {
-    for (const m of muts) {
-      if (m.type !== 'attributes' || m.target.tagName !== 'IFRAME') continue;
-      const el = m.target;
-      const newSrc = el.getAttribute('src');
-      if (!newSrc || newSrc === 'about:blank') continue;
-      if (newSrc === el.__ifmLastSrc) continue; // we just set this
-      // Intercept: remove src, run through our pipeline
-      el.removeAttribute('src');
-      navigateIframe(el, newSrc);
+  function requestNav(url) {
+    try { window.top.postMessage({ type: '__ifm_navigate', url }, '*'); } catch {}
+  }
+
+  /* ── Intercept link clicks ── */
+  document.addEventListener('click', e => {
+    const a = e.composedPath().find(n => n && n.tagName === 'A');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+
+    // Ctrl/Meta = open in new tab (normal behaviour)
+    if (e.ctrlKey || e.metaKey) return;
+
+    // Otherwise intercept and navigate in same iframe
+    e.preventDefault();
+    e.stopPropagation();
+    let resolved;
+    try { resolved = new URL(href, location.href).href; } catch { return; }
+    requestNav(resolved);
+  }, true);
+
+  // Force all target=_blank to open in same iframe unless Ctrl held
+  document.addEventListener('click', e => {
+    const a = e.composedPath().find(n => n && n.tagName === 'A');
+    if (!a || !a.target || a.target === '_self') return;
+    if (!e.ctrlKey && !e.metaKey) {
+      a.target = '_self';
     }
-  });
-  srcObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['src'], subtree: true });
+  }, true);
 
-  const domObserver = new MutationObserver((muts) => {
-    for (const m of muts) m.addedNodes.forEach(n => {
-      if (n.nodeType !== 1) return;
-      if (n.tagName === 'IFRAME') watchIframe(n);
-      n.querySelectorAll && n.querySelectorAll('iframe').forEach(watchIframe);
-    });
-  });
-  domObserver.observe(document.documentElement, { childList: true, subtree: true });
-
-  document.querySelectorAll('iframe').forEach(f => {
-    watchIframe(f);
-    const src = f.getAttribute('src');
-    if (src && src !== 'about:blank') {
-      f.__ifmLastSrc = src;
-      f.__ifmPendingUrl = src;
-    }
-  });
-
-  /* ── Message handler ───────────────────────────────────────── */
-  window.addEventListener('message', (e) => {
-    if (!e.data || typeof e.data !== 'object') return;
-    const frame = findFrameByWindow(e.source);
-
-    if (e.data.type === '__ifm_navigate') {
-      if (!frame) return;
-      navigateIframe(frame, e.data.url);
-    }
-
-    if (e.data.type === '__ifm_urlChange') {
-      // SPA navigation inside iframe — update our state without recreating
-      if (!frame) return;
-      const state = getState(frame);
-      if (state.current && state.current !== e.data.url) {
-        state.history.push(state.current);
-        state.future = [];
-      }
-      state.current = e.data.url;
-      // Also update the src attribute so external code can read it
-      frame.__ifmLastSrc = e.data.url;
-      updateBar();
-    }
-
-    if (e.data.type === '__ifm_back') {
-      // Back button from blocked page
-      if (!frame) return;
-      goBack(frame);
-    }
+  /* ── SPA navigation ── */
+  const _wrapHistory = orig => function (...args) {
+    const r = orig.apply(this, args);
+    setTimeout(() => {
+      if (location.href !== _cur) pushHistory(location.href);
+    }, 0);
+    return r;
+  };
+  history.pushState    = _wrapHistory(history.pushState);
+  history.replaceState = _wrapHistory(history.replaceState);
+  window.addEventListener('popstate', () => {
+    if (location.href !== _cur) pushHistory(location.href);
   });
 
-  /* ══════════════════════════════════════════════════════════════
-     BOTTOM-RIGHT CORNER BAR
-     - Only shows when mouse is in the bottom-right corner
-       (within CORNER_W px from right AND CORNER_H px from bottom)
-     - Flat white pill bar: ← → [url input / copy] [Go]
-  ══════════════════════════════════════════════════════════════ */
+  /* ── Tell host our initial URL ── */
+  tellHost(location.href);
 
-  const CORNER_W = 80;  // px from right edge
-  const CORNER_H = 60;  // px from bottom edge
+  /* ════════════════════════════
+     BAR UI
+  ════════════════════════════ */
+  const BAR_Z  = 2147483647;
+  const COR_W  = 72;   // px from right to trigger
+  const COR_H  = 50;   // px from bottom to trigger
 
-  const BAR_ID    = '__ifm-bar';
-  const BAR_STY   = '__ifm-bar-style';
-
-  const barCss = `
-    #${BAR_ID} {
+  const style = document.createElement('style');
+  style.textContent = `
+    #__ufb {
       all: initial;
       position: fixed;
-      bottom: 12px;
-      right: 12px;
-      z-index: 2147483647;
+      bottom: 0;
+      right: 0;
+      z-index: ${BAR_Z};
       display: flex;
-      align-items: center;
-      gap: 0;
-      background: #ffffff;
-      border: 1px solid #e0e0e0;
-      border-radius: 10px;
-      box-shadow: 0 2px 16px rgba(0,0,0,0.10), 0 1px 3px rgba(0,0,0,0.06);
-      padding: 0;
+      align-items: stretch;
+      background: #fff;
+      border-top: 1px solid #dadce0;
+      border-left: 1px solid #dadce0;
+      border-top-left-radius: 6px;
       pointer-events: none;
       opacity: 0;
-      transform: translateY(4px);
-      transition: opacity 0.15s ease, transform 0.15s ease;
+      transform: translateY(2px);
+      transition: opacity .13s ease, transform .13s ease;
+      font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+      height: 30px;
       overflow: hidden;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      height: 34px;
       white-space: nowrap;
+      box-shadow: -1px -1px 6px rgba(0,0,0,0.07);
     }
-    #${BAR_ID}.visible {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: all;
-    }
-    #${BAR_ID} .ib-btn {
+    #__ufb.show { opacity: 1; transform: translateY(0); pointer-events: all; }
+
+    #__ufb .__ub {
       all: unset;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 34px;
+      display: flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px;
       cursor: pointer;
-      color: #555;
+      color: #5f6368;
       flex-shrink: 0;
       transition: background .1s, color .1s;
-      border-right: 1px solid #f0f0f0;
+      border-right: 1px solid #f1f3f4;
     }
-    #${BAR_ID} .ib-btn:last-child { border-right: none; }
-    #${BAR_ID} .ib-btn:hover { background: #f5f5f5; color: #111; }
-    #${BAR_ID} .ib-btn:disabled { color: #ccc; cursor: default; }
-    #${BAR_ID} .ib-btn:disabled:hover { background: transparent; }
-    #${BAR_ID} .ib-btn svg { width: 13px; height: 13px; display: block; }
+    #__ufb .__ub:hover { background: #f1f3f4; color: #202124; }
+    #__ufb .__ub[disabled] { color: #ccc; cursor: default; pointer-events: none; }
+    #__ufb .__ub svg { width: 13px; height: 13px; display: block; }
 
-    #${BAR_ID} .ib-sep {
-      width: 1px;
-      height: 20px;
-      background: #ebebeb;
-      flex-shrink: 0;
-    }
-
-    #${BAR_ID} .ib-url-wrap {
-      display: flex;
-      align-items: center;
-      position: relative;
-      border-right: 1px solid #f0f0f0;
-    }
-    #${BAR_ID} .ib-url-input {
+    #__ufb .__ui {
       all: unset;
+      height: 30px;
+      padding: 0 8px;
       font-size: 11.5px;
-      color: #222;
-      width: 220px;
-      height: 34px;
-      padding: 0 8px 0 10px;
+      color: #202124;
+      width: 210px;
+      border-right: 1px solid #f1f3f4;
       cursor: text;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      letter-spacing: 0;
     }
-    #${BAR_ID} .ib-url-input::placeholder { color: #bbb; }
-    #${BAR_ID} .ib-url-input:focus { color: #111; }
+    #__ufb .__ui:focus { outline: none; background: #f8f9fa; }
+    #__ufb .__ui::placeholder { color: #9aa0a6; }
 
-    #${BAR_ID} .ib-copy-btn {
+    #__ufb .__ug {
       all: unset;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 34px;
-      cursor: pointer;
-      color: #999;
-      flex-shrink: 0;
-      transition: color .1s;
-      border-right: 1px solid #f0f0f0;
-    }
-    #${BAR_ID} .ib-copy-btn:hover { color: #333; }
-    #${BAR_ID} .ib-copy-btn svg { width: 12px; height: 12px; }
-
-    #${BAR_ID} .ib-go-btn {
-      all: unset;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0 12px;
-      height: 34px;
+      display: flex; align-items: center;
+      padding: 0 11px;
+      height: 30px;
       font-size: 11.5px;
-      font-weight: 600;
-      color: #333;
+      font-weight: 500;
+      color: #1a73e8;
       cursor: pointer;
-      transition: background .1s, color .1s;
+      transition: background .1s;
+      border-right: 1px solid #f1f3f4;
       letter-spacing: .01em;
     }
-    #${BAR_ID} .ib-go-btn:hover { background: #f5f5f5; color: #111; }
-    #${BAR_ID} .ib-go-btn.copied { color: #1a9e50; }
+    #__ufb .__ug:hover { background: #f1f3f4; }
+
+    #__ufb .__ugo {
+      all: unset;
+      display: flex; align-items: center;
+      padding: 0 9px;
+      height: 30px;
+      font-size: 11px;
+      color: #5f6368;
+      cursor: pointer;
+      transition: background .1s;
+      gap: 4px;
+    }
+    #__ufb .__ugo:hover { background: #f1f3f4; color: #202124; }
+    #__ufb .__ugo svg { width: 13px; height: 13px; display: block; }
   `;
+  (document.head || document.documentElement).appendChild(style);
 
-  const SVG_BACK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
-  const SVG_FWD  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
-  const SVG_COPY = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+  const bar = document.createElement('div');
+  bar.id = '__ufb';
 
-  let bar, backBtn, fwdBtn, urlInput, copyBtn, goBtn;
+  // Back button
+  const btnBack = document.createElement('button');
+  btnBack.className = '__ub';
+  btnBack.title = 'Back';
+  btnBack.setAttribute('disabled', '');
+  btnBack.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
+  btnBack.addEventListener('click', doBack);
 
-  function getPrimaryFrame() {
-    const frames = [...document.querySelectorAll('iframe')];
-    // Prefer visible frames with a known src
-    for (const f of frames) {
-      if (f.__ifmLastSrc || getState(f).current) return f;
+  // Forward button
+  const btnFwd = document.createElement('button');
+  btnFwd.className = '__ub';
+  btnFwd.title = 'Forward';
+  btnFwd.setAttribute('disabled', '');
+  btnFwd.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+  btnFwd.addEventListener('click', doForward);
+
+  // URL input
+  const urlInput = document.createElement('input');
+  urlInput.className = '__ui';
+  urlInput.type = 'text';
+  urlInput.spellcheck = false;
+  urlInput.autocomplete = 'off';
+  urlInput.placeholder = 'Enter address or javascript:…';
+  urlInput.value = location.href;
+  urlInput.addEventListener('focus', () => urlInput.select());
+  urlInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); doGo(); }
+    if (e.key === 'Escape') { urlInput.value = _cur; urlInput.blur(); }
+  });
+
+  // Google button
+  const btnGoogle = document.createElement('button');
+  btnGoogle.className = '__ugo';
+  btnGoogle.title = 'Go to Google';
+  btnGoogle.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>`;
+  btnGoogle.addEventListener('click', () => {
+    requestNav('https://www.google.com/?igu=1');
+  });
+
+  bar.appendChild(btnBack);
+  bar.appendChild(btnFwd);
+  bar.appendChild(urlInput);
+  bar.appendChild(btnGoogle);
+
+  document.body.appendChild(bar);
+
+  /* ── Corner hover trigger ── */
+  let _hideTimer = null;
+  const showBar = () => {
+    clearTimeout(_hideTimer);
+    bar.classList.add('show');
+  };
+  const hideBar = () => {
+    _hideTimer = setTimeout(() => bar.classList.remove('show'), 320);
+  };
+
+  document.addEventListener('mousemove', e => {
+    const fromR = window.innerWidth  - e.clientX;
+    const fromB = window.innerHeight - e.clientY;
+    if (fromR <= COR_W && fromB <= COR_H) showBar();
+  }, { passive: true });
+  bar.addEventListener('mouseenter', showBar);
+  bar.addEventListener('mouseleave', hideBar);
+  document.addEventListener('mouseleave', hideBar);
+
+  /* ── Navigation logic ── */
+  function doGo() {
+    let val = urlInput.value.trim();
+    if (!val) return;
+
+    // Bookmarklet
+    if (val.startsWith('javascript:')) {
+      try { eval(decodeURIComponent(val.slice('javascript:'.length))); } catch(e) { console.warn('Bookmarklet error', e); }
+      urlInput.blur();
+      return;
     }
-    return frames[0] || null;
-  }
 
-  function updateBar() {
-    if (!bar) return;
-    const frame = getPrimaryFrame();
-    if (!frame) return;
-    const state = getState(frame);
-    const url = state.current || '';
+    // Auto-protocol
+    if (!/^https?:\/\//i.test(val)) val = 'https://' + val;
 
-    // Update input only if not focused
-    if (document.activeElement !== urlInput) {
-      urlInput.value = url;
-    }
-
-    backBtn.disabled = state.history.length === 0;
-    fwdBtn.disabled  = state.future.length === 0;
-  }
-
-  function buildBar() {
-    if (document.getElementById(BAR_ID)) return;
-
-    const sty = document.createElement('style');
-    sty.id = BAR_STY;
-    sty.textContent = barCss;
-    (document.head || document.documentElement).appendChild(sty);
-
-    bar = document.createElement('div');
-    bar.id = BAR_ID;
-
-    // Back button
-    backBtn = document.createElement('button');
-    backBtn.className = 'ib-btn';
-    backBtn.title = 'Back';
-    backBtn.innerHTML = SVG_BACK;
-    backBtn.addEventListener('click', () => {
-      const f = getPrimaryFrame();
-      if (f) goBack(f);
-    });
-
-    // Forward button
-    fwdBtn = document.createElement('button');
-    fwdBtn.className = 'ib-btn';
-    fwdBtn.title = 'Forward';
-    fwdBtn.innerHTML = SVG_FWD;
-    fwdBtn.addEventListener('click', () => {
-      const f = getPrimaryFrame();
-      if (f) goForward(f);
-    });
-
-    // URL input + copy wrapper
-    const urlWrap = document.createElement('div');
-    urlWrap.className = 'ib-url-wrap';
-
-    urlInput = document.createElement('input');
-    urlInput.className = 'ib-url-input';
-    urlInput.type = 'text';
-    urlInput.placeholder = 'Enter URL…';
-    urlInput.spellcheck = false;
-    urlInput.autocomplete = 'off';
-
-    // Select all on focus for easy replacement
-    urlInput.addEventListener('focus', () => urlInput.select());
-
-    // Pressing Enter navigates
-    urlInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        doNavigate();
-      }
-      if (e.key === 'Escape') urlInput.blur();
-    });
-
-    copyBtn = document.createElement('button');
-    copyBtn.className = 'ib-copy-btn';
-    copyBtn.title = 'Copy URL';
-    copyBtn.innerHTML = SVG_COPY;
-    copyBtn.addEventListener('click', () => {
-      const url = urlInput.value || (getPrimaryFrame() && getState(getPrimaryFrame()).current) || '';
-      const doCopy = () => {
-        goBtn.textContent = 'Copied!';
-        goBtn.classList.add('copied');
-        setTimeout(() => {
-          goBtn.textContent = 'Go';
-          goBtn.classList.remove('copied');
-        }, 1200);
-      };
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(doCopy).catch(() => fallbackCopy(url, doCopy));
-      } else {
-        fallbackCopy(url, doCopy);
-      }
-    });
-
-    urlWrap.appendChild(urlInput);
-    urlWrap.appendChild(copyBtn);
-
-    // Go button
-    goBtn = document.createElement('button');
-    goBtn.className = 'ib-go-btn';
-    goBtn.textContent = 'Go';
-    goBtn.addEventListener('click', doNavigate);
-
-    bar.appendChild(backBtn);
-    bar.appendChild(fwdBtn);
-    bar.appendChild(urlWrap);
-    bar.appendChild(goBtn);
-
-    document.body.appendChild(bar);
-    updateBar();
-
-    // Hover trigger: bottom-right CORNER only
-    let hideTimer = null;
-    const show = () => { clearTimeout(hideTimer); bar.classList.add('visible'); };
-    const hide = () => {
-      hideTimer = setTimeout(() => bar.classList.remove('visible'), 300);
-    };
-
-    document.addEventListener('mousemove', (e) => {
-      const fromRight  = window.innerWidth  - e.clientX;
-      const fromBottom = window.innerHeight - e.clientY;
-      if (fromRight <= CORNER_W && fromBottom <= CORNER_H) {
-        show();
-      }
-    }, { passive: true });
-
-    bar.addEventListener('mouseenter', show);
-    bar.addEventListener('mouseleave', hide);
-    document.addEventListener('mouseleave', hide);
-  }
-
-  function doNavigate() {
-    let url = urlInput.value.trim();
-    if (!url) return;
-    // Auto-prepend https:// if no protocol
-    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-    const frame = getPrimaryFrame();
-    if (frame) navigateIframe(frame, url);
+    requestNav(val);
     urlInput.blur();
   }
 
-  function fallbackCopy(text, cb) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    Object.assign(ta.style, { position:'fixed', opacity:'0', top:'0', left:'0' });
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); cb(); } catch {}
-    ta.remove();
+  function doBack() {
+    if (!_hist.length) return;
+    const prev = _hist.pop();
+    _fwd.unshift(_cur);
+    _cur = prev;
+    urlInput.value = _cur;
+    updateBar();
+    requestNav(_cur);
   }
 
-  if (document.body) buildBar();
-  else document.addEventListener('DOMContentLoaded', buildBar);
+  function doForward() {
+    if (!_fwd.length) return;
+    const next = _fwd.shift();
+    _hist.push(_cur);
+    _cur = next;
+    urlInput.value = _cur;
+    updateBar();
+    requestNav(_cur);
+  }
+
+  function updateBar() {
+    if (_hist.length > 0) {
+      btnBack.removeAttribute('disabled');
+    } else {
+      btnBack.setAttribute('disabled', '');
+    }
+    if (_fwd.length > 0) {
+      btnFwd.removeAttribute('disabled');
+    } else {
+      btnFwd.setAttribute('disabled', '');
+    }
+    if (document.activeElement !== urlInput) {
+      urlInput.value = _cur;
+    }
+  }
 
 })();
