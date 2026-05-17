@@ -425,10 +425,8 @@ h1{font-size:22px;font-weight:400;margin-bottom:8px;text-align:center}
     const inCorner = window.innerWidth - e.clientX <= COR_W && window.innerHeight - e.clientY <= COR_H;
     if (inCorner || _barHovered) {
       _show();
-    } else {
-      clearTimeout(_ht);
-      _hide();
     }
+    // Don't reset the hide timer here — let mouseleave handle hiding
   }, { passive: true });
   bar.addEventListener('mouseenter', () => { _barHovered = true;  _show(); });
   bar.addEventListener('mouseleave', () => { _barHovered = false; _hide(); });
