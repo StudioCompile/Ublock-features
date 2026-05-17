@@ -52,16 +52,37 @@
     localStorage.setItem(SITES_KEY, JSON.stringify(getSites().filter(function(s){ return s !== origin; })));
   }
 
-  // ── Bridge: push a script array into another site's localStorage ──
-  // Works by opening a tiny hidden window to the target origin.
-  // That window has uFeatures.js injected and listens for uf_bridge_set.
+  // ── Bridge: push scripts into another site's localStorage ────────
+  // Strategy:
+  //   1. Check if there's already an open window/tab for that origin (tracked in _bridgeWins).
+  //      If so, reuse it via postMessage — no new window needed.
+  //   2. Otherwise open a new tiny window. It overrides its own page with a
+  //      discreet "Saving data…" status bar so it looks like a normal background tab.
+  var _bridgeWins = {}; // origin → window ref
+
   function pushToSite(origin, scripts, onDone){
+    // Reuse existing open window for this origin if available
+    var existing = _bridgeWins[origin];
+    if(existing && !existing.closed){
+      var handler2 = function(e){
+        if(e.source !== existing || !e.data || e.data.type !== "uf_bridge_ack") return;
+        window.removeEventListener("message", handler2);
+        if(onDone) onDone();
+      };
+      window.addEventListener("message", handler2);
+      try{ existing.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, origin); }
+      catch(e){}
+      return;
+    }
+
     var win = window.open(origin + "/?__ufb=1", "_blank",
-      "width=1,height=1,top=-300,left=-300,menubar=no,toolbar=no,location=no,status=no");
+      "width=400,height=28,top="+(screen.height-36)+",left=0,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=no");
     if(!win){
       alert("[uFeatures] Popup blocked — please allow popups for this site.");
       return;
     }
+    _bridgeWins[origin] = win;
+
     var done = false, attempts = 0;
     var poll = setInterval(function(){
       if(done || attempts > 80){ clearInterval(poll); if(!done){ try{win.close();}catch(e){} } return; }
@@ -74,13 +95,14 @@
       done = true;
       clearInterval(poll);
       window.removeEventListener("message", handler);
-      setTimeout(function(){ try{win.close();}catch(e){} }, 150);
+      setTimeout(function(){ try{win.close(); delete _bridgeWins[origin];}catch(e){} }, 600);
       if(onDone) onDone();
     };
     window.addEventListener("message", handler);
   }
 
   // ── Bridge listener: every page receives pushes ───────────────────
+  // Also renders a discreet status bar when opened as a bridge window.
   window.addEventListener("message", function(e){
     var d = e.data; if(!d) return;
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
@@ -90,6 +112,21 @@
       }catch(ex){}
     }
   });
+
+  // If this page was opened as a bridge window, override it with a status bar
+  if(location.search.indexOf("__ufb=1") !== -1 && !IS_SETTINGS){
+    document.addEventListener("DOMContentLoaded", function(){
+      try{
+        document.title = "Saving data\u2026";
+        document.body.style.cssText="margin:0;padding:0;background:#f1f3f4;font-family:'Segoe UI',sans-serif;font-size:12px;color:#5f6368;display:flex;align-items:center;height:28px;padding:0 12px;gap:8px;overflow:hidden;user-select:none";
+        document.body.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0"><circle cx="12" cy="12" r="10" stroke="#5f6368" stroke-width="1.5"/><path d="M12 7v5l3 3" stroke="#5f6368" stroke-width="1.5" stroke-linecap="round"/></svg><span>Saving data\u2026</span>';
+        // Animate dots
+        var span = document.body.querySelector("span");
+        var dots = 0;
+        setInterval(function(){ dots=(dots+1)%4; span.textContent="Saving data"+"...".slice(0,dots); },400);
+      }catch(ex){}
+    });
+  }
 
   // ── Securly blocker ──────────────────────────────────────────────
   function killSecurly(){
@@ -105,10 +142,10 @@
 
   // ── Domain matching ──────────────────────────────────────────────
   function matchesDomain(pattern){
-    if(!pattern || !pattern.trim()) return true;
+    if(!pattern || !pattern.trim()) return false; // blank = never run (must specify domain)
     var host = location.hostname, path = location.pathname;
     return pattern.trim().split(",").some(function(p){
-      p = p.trim(); if(!p || p === "*") return true;
+      p = p.trim(); if(!p) return false;
       var si = p.indexOf("/");
       var hp = si === -1 ? p : p.slice(0, si);
       var pp = si === -1 ? "" : p.slice(si);
@@ -122,11 +159,11 @@
   }
 
   function domainMatchesOrigin(pattern, origin){
-    if(!pattern || !pattern.trim()) return true;
+    if(!pattern || !pattern.trim()) return false;
     try{
       var host = new URL(origin).hostname;
       return pattern.trim().split(",").some(function(p){
-        p = p.trim(); if(!p || p === "*") return true;
+        p = p.trim(); if(!p) return false;
         var si = p.indexOf("/"); var hp = si === -1 ? p : p.slice(0, si);
         return hp.slice(0,2) === "*."
           ? host === hp.slice(2) || host.endsWith("." + hp.slice(2))
@@ -169,6 +206,12 @@
     var w = f.parentNode;
     w.style.display=""; w.style.background="#282828";
     f.style.background="#282828"; f.style.opacity="1";
+    // Block inspect/devtools on the chii iframe itself
+    f.addEventListener("contextmenu", function(e){ e.preventDefault(); e.stopPropagation(); }, true);
+    f.addEventListener("keydown", function(e){
+      if(e.key==="F12"||(e.ctrlKey&&e.shiftKey&&(e.key==="I"||e.key==="J"||e.key==="C"))||(e.ctrlKey&&e.key==="U"))
+        e.preventDefault();
+    }, true);
     document.body.style.height=(document.documentElement.clientHeight - Math.floor(
       Number(localStorage["chii-embedded-height"]||document.documentElement.clientHeight/2)||100
     ))+"px";
@@ -319,7 +362,7 @@
           +'<div class="uf-card"><div class="uf-fa">'
             +'<div class="uf-g2">'
               +'<div><div class="uf-lbl">Script name</div><input id="uf-nameF" class="uf-in" type="text" value="Example Script"></div>'
-              +'<div><div class="uf-lbl">Target domain (blank = all sites)</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com"></div>'
+              +'<div><div class="uf-lbl">Target domain</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com or *.example.com/path"></div>'
             +'</div>'
             +'<div><div class="uf-lbl">JavaScript</div><textarea id="uf-codeF" class="uf-ta" placeholder="// Your script here..."></textarea></div>'
           +'</div>'
