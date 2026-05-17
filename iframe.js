@@ -61,9 +61,11 @@
     }
 
     // Watch src attribute changes to track pending URL
+    // __ifmSuppressObs is set to true when WE set the src to avoid re-triggering
     const srcObs = new MutationObserver(muts => {
       for (const m of muts) {
         if (m.type !== 'attributes' || m.target.tagName !== 'IFRAME') continue;
+        if (m.target.__ifmSuppressObs) continue;
         const src = m.target.getAttribute('src');
         if (src && src !== 'about:blank') {
           m.target.__ifmPendingUrl = src;
@@ -73,6 +75,15 @@
     srcObs.observe(document.documentElement, {
       attributes: true, attributeFilter: ['src'], subtree: true
     });
+
+    function setSrc(frame, url) {
+      frame.__ifmSuppressObs = true;
+      frame.__ifmPendingUrl = url;
+      frame.removeAttribute('srcdoc');
+      frame.src = url;
+      // Allow one tick for the mutation to fire then re-enable
+      setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
+    }
 
     // Watch for new iframes
     const domObs = new MutationObserver(muts => {
@@ -93,10 +104,7 @@
       if (e.data.type === '__ifm_navigate') {
         const frame = findFrameByWindow(e.source);
         if (!frame) return;
-        const url = e.data.url;
-        frame.__ifmPendingUrl = url;
-        frame.src = url;
-        // update src attr so observers can track it
+        setSrc(frame, e.data.url);
       }
 
       // Go back from blocked page
@@ -106,26 +114,26 @@
         const hist = frame.__ifmBackStack || [];
         const prev = hist.pop();
         frame.__ifmBackStack = hist;
-        if (prev && prev !== 'about:srcdoc' && !prev.startsWith('data:')) {
-          frame.__ifmPendingUrl = prev;
-          frame.removeAttribute('srcdoc');
-          frame.src = prev;
+        if (prev && !prev.startsWith('data:')) {
+          setSrc(frame, prev);
         }
       }
 
-      // iframe telling us its current real URL (for src tracking)
+      // iframe telling us its current real URL (for src tracking on SPA navigations)
       if (e.data.type === '__ifm_seturl') {
         const frame = findFrameByWindow(e.source);
         if (!frame) return;
-        // Push old src to back stack before updating
-        const old = frame.__ifmPendingUrl || frame.getAttribute('src');
-        if (old && old !== 'about:blank' && old !== e.data.url) {
+        const old = frame.__ifmPendingUrl;
+        const newUrl = e.data.url;
+        if (old && old !== 'about:blank' && old !== newUrl) {
           if (!frame.__ifmBackStack) frame.__ifmBackStack = [];
           frame.__ifmBackStack.push(old);
         }
-        frame.__ifmPendingUrl = e.data.url;
-        // Update the actual src attribute so host page JS can read it
-        frame.setAttribute('src', e.data.url);
+        // Update src attr visibly for host page observers without re-triggering srcObs
+        frame.__ifmSuppressObs = true;
+        frame.setAttribute('src', newUrl);
+        setTimeout(() => { frame.__ifmSuppressObs = false; }, 0);
+        frame.__ifmPendingUrl = newUrl;
       }
     });
 
