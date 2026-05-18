@@ -53,80 +53,105 @@
   }
 
   // ── Bridge: push scripts into another site's localStorage ────────
-  // Strategy:
-  //   1. Check if there's already an open window/tab for that origin (tracked in _bridgeWins).
-  //      If so, reuse it via postMessage — no new window needed.
-  //   2. Otherwise open a new tiny window. It overrides its own page with a
-  //      discreet "Saving data…" status bar so it looks like a normal background tab.
-  var _bridgeWins = {}; // origin → window ref
+  // Uses window.open with a stable name per origin so the browser reuses
+  // an already-open tab for that origin instead of spawning a new one.
+  // The bridge page takes over immediately via document.write to show
+  // "Saving data…" no matter what the site would normally render.
+
+  function originToWinName(origin){
+    // Stable window name from origin — strips protocol and special chars
+    return "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g,"_");
+  }
 
   function pushToSite(origin, scripts, onDone){
-    // Reuse existing open window for this origin if available
-    var existing = _bridgeWins[origin];
-    if(existing && !existing.closed){
-      var handler2 = function(e){
-        if(e.source !== existing || !e.data || e.data.type !== "uf_bridge_ack") return;
-        window.removeEventListener("message", handler2);
-        if(onDone) onDone();
-      };
-      window.addEventListener("message", handler2);
-      try{ existing.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, origin); }
-      catch(e){}
-      return;
-    }
+    var winName = originToWinName(origin);
 
-    var win = window.open(origin + "/?__ufb=1", "_blank",
-      "width=400,height=28,top="+(screen.height-36)+",left=0,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=no");
+    var win = window.open(origin + "/?__ufb=1", winName,
+      "width=420,height=28,top="+(screen.availHeight-40)+",left=0,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=no");
     if(!win){
       alert("[uFeatures] Popup blocked — please allow popups for this site.");
       return;
     }
-    _bridgeWins[origin] = win;
 
     var done = false, attempts = 0;
     var poll = setInterval(function(){
-      if(done || attempts > 80){ clearInterval(poll); if(!done){ try{win.close();}catch(e){} } return; }
+      if(done || attempts > 100){ clearInterval(poll); if(!done){ try{win.close();}catch(e){} } return; }
       try{ win.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, origin); }
       catch(e){}
       attempts++;
     }, 100);
+
     var handler = function(e){
       if(e.source !== win || !e.data || e.data.type !== "uf_bridge_ack") return;
       done = true;
       clearInterval(poll);
       window.removeEventListener("message", handler);
-      setTimeout(function(){ try{win.close(); delete _bridgeWins[origin];}catch(e){} }, 600);
+      // Leave window open a moment so it can finish rendering "Saved ✓"
+      setTimeout(function(){ try{win.close();}catch(e){} }, 800);
       if(onDone) onDone();
     };
     window.addEventListener("message", handler);
   }
 
   // ── Bridge listener: every page receives pushes ───────────────────
-  // Also renders a discreet status bar when opened as a bridge window.
   window.addEventListener("message", function(e){
     var d = e.data; if(!d) return;
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
       try{
         siteSave(d.scripts);
         e.source.postMessage({ type:"uf_bridge_ack" }, e.origin);
+        // Update status text to "Saved ✓" if we're the bridge page
+        var st = document.getElementById("__uf_bridge_st");
+        if(st) st.textContent = "Saved \u2713";
       }catch(ex){}
     }
   });
 
-  // If this page was opened as a bridge window, override it with a status bar
-  if(location.search.indexOf("__ufb=1") !== -1 && !IS_SETTINGS){
-    document.addEventListener("DOMContentLoaded", function(){
+  // ── Bridge page takeover ─────────────────────────────────────────
+  // Runs as early as possible — before any site JS or redirects can fire.
+  // Checks both the query string AND the window name so it works even
+  // if the site strips or rewrites the query param on redirect.
+  (function(){
+    var isBridge = location.search.indexOf("__ufb=1") !== -1
+                || (window.name && window.name.indexOf("uf_bridge_") === 0);
+    if(!isBridge || IS_SETTINGS) return;
+
+    // Take over immediately — document.open() nukes all existing content
+    // and stops any pending navigation/scripts the original page had.
+    function takeover(){
       try{
-        document.title = "Saving data\u2026";
-        document.body.style.cssText="margin:0;padding:0;background:#f1f3f4;font-family:'Segoe UI',sans-serif;font-size:12px;color:#5f6368;display:flex;align-items:center;height:28px;padding:0 12px;gap:8px;overflow:hidden;user-select:none";
-        document.body.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0"><circle cx="12" cy="12" r="10" stroke="#5f6368" stroke-width="1.5"/><path d="M12 7v5l3 3" stroke="#5f6368" stroke-width="1.5" stroke-linecap="round"/></svg><span>Saving data\u2026</span>';
-        // Animate dots
-        var span = document.body.querySelector("span");
-        var dots = 0;
-        setInterval(function(){ dots=(dots+1)%4; span.textContent="Saving data"+"...".slice(0,dots); },400);
+        document.open();
+        document.write(
+          '<!DOCTYPE html><html><head>'
+          +'<meta charset="utf-8">'
+          +'<title>Saving data\u2026</title>'
+          +'<style>'
+          +'*{margin:0;padding:0;box-sizing:border-box}'
+          +'html,body{height:100%;overflow:hidden;background:#f1f3f4;font-family:"Segoe UI",system-ui,sans-serif;font-size:12px;color:#5f6368;user-select:none}'
+          +'body{display:flex;align-items:center;padding:0 12px;gap:8px}'
+          +'#__uf_bridge_st{}'
+          +'</style>'
+          +'</head><body>'
+          +'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;animation:spin 1.2s linear infinite" xmlns="http://www.w3.org/2000/svg">'
+          +'<circle cx="12" cy="12" r="9" stroke="#c8c8cc" stroke-width="2"/>'
+          +'<path d="M12 3a9 9 0 0 1 9 9" stroke="#5f6368" stroke-width="2" stroke-linecap="round"/>'
+          +'</svg>'
+          +'<style>@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}</style>'
+          +'<span id="__uf_bridge_st">Saving data\u2026</span>'
+          +'</body></html>'
+        );
+        document.close();
       }catch(ex){}
-    });
-  }
+    }
+
+    // Run immediately if we can, otherwise as early as possible
+    if(document.readyState === "loading"){
+      // Fire synchronously before DOMContentLoaded — inline script timing
+      takeover();
+    } else {
+      takeover();
+    }
+  })();
 
   // ── Securly blocker ──────────────────────────────────────────────
   function killSecurly(){
@@ -204,8 +229,8 @@
   function showChii(){
     var f = getChiiFrame(); if(!f) return;
     var w = f.parentNode;
-    w.style.display=""; w.style.background="#282828";
-    f.style.background="#282828"; f.style.opacity="1";
+    w.style.cssText += ";display:block!important;background:#282828!important;opacity:1!important;pointer-events:auto!important;";
+    f.style.cssText += ";background:#282828!important;opacity:1!important;display:block!important;";
     // Block inspect/devtools on the chii iframe itself
     f.addEventListener("contextmenu", function(e){ e.preventDefault(); e.stopPropagation(); }, true);
     f.addEventListener("keydown", function(e){
@@ -289,9 +314,10 @@
       ".uf-tab:hover{color:#1c1b22;background:rgba(0,0,0,.03)}",
       ".uf-tab.on{color:#1c1b22;border-bottom-color:#7f0000}",
       ".uf-top-actions{margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 12px}",
-      // Content
-      "#uf-body{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#c8c8cc transparent}",
-      ".uf-sec{display:none}.uf-sec.on{display:block}",
+      // Body — normal scrollable for most tabs
+      "#uf-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}",
+      ".uf-scroll{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#c8c8cc transparent}",
+      ".uf-sec{display:none}.uf-sec.on{display:flex;flex-direction:column;flex:1;min-height:0}",
       // Status bar
       "#uf-bar{height:22px;background:#e0e0e4;display:flex;align-items:center;padding:0 12px;gap:20px;flex-shrink:0}",
       "#uf-bar span{font-size:11px;color:#6f6e77}","#uf-bar b{color:#1c1b22;font-weight:400}",
@@ -299,8 +325,10 @@
       // Buttons
       ".uf-btn{padding:5px 14px;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #c8c8cc;background:#fff;color:#1c1b22;transition:background .1s,border-color .1s}",
       ".uf-btn:hover{background:#f0f0f4;border-color:#adadb1}",
+      ".uf-btn:disabled{opacity:.45;cursor:default;pointer-events:none}",
       ".uf-btn.prim{background:#7f0000;border-color:#7f0000;color:#fff}.uf-btn.prim:hover{background:#6a0000;border-color:#6a0000}",
       ".uf-btn.danger{color:#cc0000;border-color:#c8c8cc;background:#fff}.uf-btn.danger:hover{background:#fff0f0;border-color:#cc0000}",
+      ".uf-btn.icon{padding:4px 8px;font-size:14px;line-height:1}",
       // Section header
       ".uf-sh{font-size:11px;font-weight:600;color:#6f6e77;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #c8c8cc}",
       // Card
@@ -334,18 +362,47 @@
       ".uf-krow:last-child{border-bottom:none}",
       ".uf-kbd{background:#f0f0f4;border:1px solid #c8c8cc;border-radius:3px;padding:3px 10px;font-family:monospace;font-size:12px;color:#1c1b22;min-width:170px;text-align:center}",
       ".uf-kdesc{font-size:12px;color:#6f6e77}",
-      "code.uf-c{background:#f0f0f4;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px;color:#1c1b22}"
+      "code.uf-c{background:#f0f0f4;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px;color:#1c1b22}",
+      // Home tab
+      ".uf-home-hero{display:flex;align-items:center;gap:16px;padding:24px 0 20px}",
+      ".uf-home-hero h1{font-size:22px;font-weight:300;color:#1c1b22;letter-spacing:-.3px}",
+      ".uf-home-hero h1 b{font-weight:700;color:#7f0000}",
+      ".uf-home-credit{font-size:11px;color:#adadb1;margin-top:2px}",
+      ".uf-home-credit a{color:#7f0000;text-decoration:none}.uf-home-credit a:hover{text-decoration:underline}",
+      ".uf-feat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:4px}",
+      ".uf-feat{background:#fff;border:1px solid #c8c8cc;border-radius:4px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}",
+      ".uf-feat-title{font-size:13px;font-weight:600;color:#1c1b22;margin-bottom:4px;display:flex;align-items:center;gap:7px}",
+      ".uf-feat-icon{font-size:15px}",
+      ".uf-feat-desc{font-size:12px;color:#6f6e77;line-height:1.6}",
+      // Games tab
+      "#uf-tab-games{flex:1;min-height:0}",
+      "#uf-games-wrap{display:flex;flex-direction:column;flex:1;min-height:0;background:#f9f9fb}",
+      "#uf-games-nav{display:flex;align-items:center;gap:4px;padding:5px 8px;background:#fff;border-bottom:1px solid #c8c8cc;flex-shrink:0}",
+      "#uf-games-nav .uf-btn.icon{font-size:16px;padding:3px 7px}",
+      "#uf-games-url{flex:1;border:1px solid #c8c8cc;border-radius:3px;padding:4px 8px;font-size:12px;font-family:inherit;outline:none;color:#1c1b22;background:#f9f9fb;transition:border-color .12s}",
+      "#uf-games-url:focus{border-color:#7f0000;background:#fff;box-shadow:0 0 0 1px rgba(127,0,0,.15)}",
+      "#uf-games-frame{flex:1;width:100%;border:none;background:#fff;display:block}",
+      // Bookmarks bar
+      "#uf-bm-bar{display:flex;align-items:center;gap:2px;padding:3px 8px;background:#f9f9fb;border-bottom:1px solid #e0e0e4;flex-shrink:0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}",
+      "#uf-bm-bar::-webkit-scrollbar{display:none}",
+      ".uf-bm{display:flex;align-items:center;gap:4px;padding:2px 9px;border-radius:3px;font-size:11.5px;color:#1c1b22;cursor:pointer;white-space:nowrap;border:1px solid transparent;transition:background .1s}",
+      ".uf-bm:hover{background:#e8e8ed;border-color:#c8c8cc}",
+      ".uf-bm-add{color:#6f6e77;font-size:15px;padding:1px 6px;border-radius:3px;cursor:pointer;transition:background .1s;flex-shrink:0;user-select:none}",
+      ".uf-bm-add:hover{background:#e8e8ed}",
+      ".uf-bm-sep{width:1px;height:14px;background:#c8c8cc;margin:0 2px;flex-shrink:0}"
     ].join("\n");
   }
 
   function settingsHTML(){
     var iconUrl = "https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
     return '<div id="uf-wrap">'
-      // Top
+      // Top bar
       +'<div id="uf-top">'
         +'<div class="uf-logo"><img src="'+iconUrl+'" width="20" height="20" style="object-fit:contain">uFeatures</div>'
         +'<div class="uf-tabs">'
-          +'<div class="uf-tab on" data-tab="scripts">My Scripts</div>'
+          +'<div class="uf-tab on" data-tab="home">Home</div>'
+          +'<div class="uf-tab" data-tab="scripts">My Scripts</div>'
+          +'<div class="uf-tab" data-tab="games">Games</div>'
           +'<div class="uf-tab" data-tab="keys">Shortcuts</div>'
         +'</div>'
         +'<div class="uf-top-actions">'
@@ -353,11 +410,32 @@
         +'</div>'
       +'</div>'
 
-      // Body
+      // Body — flex container so Games tab can fill height
       +'<div id="uf-body">'
 
-        // Scripts
-        +'<div class="uf-sec on" id="uf-tab-scripts">'
+        // HOME TAB
+        +'<div class="uf-sec on" id="uf-tab-home"><div class="uf-scroll">'
+          +'<div class="uf-home-hero">'
+            +'<img src="'+iconUrl+'" width="48" height="48" style="object-fit:contain;flex-shrink:0">'
+            +'<div>'
+              +'<h1>u<b>Features</b></h1>'
+              +'<div class="uf-home-credit">By <a href="#" title="Roblox: studiocompile | Discord: @roblox_studio">StudioCompile</a> &mdash; Roblox: studiocompile &middot; Discord: @roblox_studio</div>'
+            +'</div>'
+          +'</div>'
+          +'<div class="uf-sh">Features</div>'
+          +'<div class="uf-feat-grid">'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9998;</span>Script Manager</div><div class="uf-feat-desc">Save JavaScript snippets that auto-run on specific sites every page load. Edit, toggle, or delete any time from My Scripts.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#8593;</span>Script Sync</div><div class="uf-feat-desc">Scripts are stored on google.com and pushed to target sites automatically via a discreet bridge window. Updates sync on save, toggle, or delete.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9726;</span>Securly Blocker</div><div class="uf-feat-desc">Automatically removes Securly overlay elements on every page load using a MutationObserver so they can\'t come back.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#128269;</span>Chii Debugger</div><div class="uf-feat-desc">Injects the Chii remote DevTools inspector into any page. Dark background loads immediately so you know it activated. Ctrl+Shift+I to toggle.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#127918;</span>Games Tab</div><div class="uf-feat-desc">Full-page iframe browser with back/forward history, editable bookmarks, and a URL bar. Default bookmarks: AZ Games, Zap Games, and Pizza Edition.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#128203;</span>Bookmarklet Runner</div><div class="uf-feat-desc">Copy any javascript: URL then Ctrl+V outside a text field to run it on the current page instantly.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9000;</span>Shortcuts</div><div class="uf-feat-desc">Ctrl+` opens settings. Ctrl+Shift+I toggles Chii. See the Shortcuts tab for the full list.</div></div>'
+          +'</div>'
+        +'</div></div>'
+
+        // SCRIPTS TAB
+        +'<div class="uf-sec" id="uf-tab-scripts"><div class="uf-scroll">'
           +'<div class="uf-sh">Add / Edit Script</div>'
           +'<div class="uf-card"><div class="uf-fa">'
             +'<div class="uf-g2">'
@@ -372,17 +450,38 @@
           +'</div></div>'
           +'<div class="uf-sh" style="margin-top:20px">Saved Scripts</div>'
           +'<div class="uf-card" id="uf-slist"></div>'
+        +'</div></div>'
+
+        // GAMES TAB
+        +'<div class="uf-sec" id="uf-tab-games">'
+          +'<div id="uf-games-wrap">'
+            // Nav bar
+            +'<div id="uf-games-nav">'
+              +'<button class="uf-btn icon" id="uf-g-back" title="Back">&#8592;</button>'
+              +'<button class="uf-btn icon" id="uf-g-fwd" title="Forward">&#8594;</button>'
+              +'<button class="uf-btn icon" id="uf-g-home" title="Google" style="font-size:12px;padding:3px 8px">G</button>'
+              +'<input id="uf-games-url" type="text" spellcheck="false" autocomplete="off" placeholder="Enter URL or press a bookmark…">'
+            +'</div>'
+            // Bookmarks bar
+            +'<div id="uf-bm-bar">'
+              +'<span id="uf-bm-list"></span>'
+              +'<span class="uf-bm-sep"></span>'
+              +'<span class="uf-bm-add" id="uf-bm-add" title="Add bookmark">+</span>'
+            +'</div>'
+            // Iframe
+            +'<iframe id="uf-games-frame" src="https://www.google.com?igu=1" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"></iframe>'
+          +'</div>'
         +'</div>'
 
-        // Keys
-        +'<div class="uf-sec" id="uf-tab-keys">'
+        // KEYS TAB
+        +'<div class="uf-sec" id="uf-tab-keys"><div class="uf-scroll">'
           +'<div class="uf-sh">Keyboard Shortcuts</div>'
           +'<div class="uf-card">'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + `</span><span class="uf-kdesc">Open uFeatures settings in a new tab</span></div>'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + Shift + I</span><span class="uf-kdesc">Toggle Chii remote debugger</span></div>'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + V</span><span class="uf-kdesc">Run a <code class="uf-c">javascript:</code> bookmarklet from clipboard (outside text fields)</span></div>'
           +'</div>'
-        +'</div>'
+        +'</div></div>'
 
       +'</div>'
 
@@ -511,7 +610,7 @@
     var domF = document.getElementById("uf-domF");
     if(_referrer) domF.value = _referrer;
 
-    // Tabs
+    // Tabs — sections are flex children of #uf-body
     document.querySelectorAll(".uf-tab").forEach(function(tab){
       tab.addEventListener("click", function(){
         document.querySelectorAll(".uf-tab").forEach(function(t){ t.classList.remove("on"); });
@@ -555,7 +654,185 @@
       });
     });
 
+    wireGames();
     renderScripts(); updateBar();
+  }
+
+  // ── Games tab ────────────────────────────────────────────────────
+  var BM_KEY = "__uFeaturesBookmarks";
+  var _gHistory = [], _gFuture = [], _gCurrent = "https://www.google.com?igu=1";
+
+  function loadBookmarks(){
+    try{ return JSON.parse(localStorage.getItem(BM_KEY)||"null"); }catch(e){ return null; }
+  }
+  function saveBookmarks(arr){ localStorage.setItem(BM_KEY, JSON.stringify(arr)); }
+
+  var DEFAULT_BOOKMARKS = [
+    { title:"AZ Games",       url:"https://www.azgames.io" },
+    { title:"Zap Games",      url:"https://zapgames.io" },
+    { title:"Pizza Edition",  url:"https://learncodingdaily.com" }
+  ];
+
+  function wireGames(){
+    var frame   = document.getElementById("uf-games-frame");
+    var urlInput= document.getElementById("uf-games-url");
+    var backBtn = document.getElementById("uf-g-back");
+    var fwdBtn  = document.getElementById("uf-g-fwd");
+    var homeBtn = document.getElementById("uf-g-home");
+
+    if(!frame) return;
+
+    // Load or init bookmarks
+    var bms = loadBookmarks() || DEFAULT_BOOKMARKS.slice();
+    renderBookmarks(bms, frame);
+
+    // Update URL bar
+    function updateNav(){
+      urlInput.value = _gCurrent || "";
+      backBtn.disabled = _gHistory.length === 0;
+      fwdBtn.disabled  = _gFuture.length === 0;
+    }
+
+    // Navigate iframe to URL, managing history
+    function gNavigate(url, pushHist){
+      if(pushHist !== false && _gCurrent && _gCurrent !== url){
+        _gHistory.push(_gCurrent);
+        _gFuture = [];
+      }
+      _gCurrent = url;
+      frame.src = url;
+      updateNav();
+    }
+
+    // Watch iframe src changes (set by iframeMenu.js or by load events)
+    // Poll src since cross-origin events are limited
+    var _lastObservedSrc = frame.src;
+    setInterval(function(){
+      var s;
+      try{ s = frame.contentWindow.location.href; }catch(e){ s = null; }
+      // Fallback: read attribute (works same-origin or if iframeMenu updates it)
+      if(!s || s === "about:blank" || s === "about:srcdoc"){
+        s = frame.getAttribute("src") || _gCurrent;
+      }
+      if(s && s !== _lastObservedSrc && s !== "about:blank" && s !== "about:srcdoc"){
+        _lastObservedSrc = s;
+        if(_gCurrent && _gCurrent !== s){
+          _gHistory.push(_gCurrent);
+          _gFuture = [];
+        }
+        _gCurrent = s;
+        if(document.activeElement !== urlInput) urlInput.value = s;
+        backBtn.disabled = _gHistory.length === 0;
+        fwdBtn.disabled  = _gFuture.length === 0;
+      }
+    }, 400);
+
+    // Also listen for postMessage from iframe (iframeMenu.js sends __ifm_urlChange)
+    window.addEventListener("message", function(e){
+      var d = e.data; if(!d || typeof d !== "object") return;
+      if(d.type === "__ifm_urlChange" && d.url){
+        var url = d.url;
+        if(url === _gCurrent) return;
+        _gHistory.push(_gCurrent);
+        _gFuture = [];
+        _gCurrent = url;
+        if(document.activeElement !== urlInput) urlInput.value = url;
+        backBtn.disabled = false;
+        fwdBtn.disabled  = true;
+      }
+    });
+
+    // Back
+    backBtn.addEventListener("click", function(){
+      if(!_gHistory.length) return;
+      _gFuture.unshift(_gCurrent);
+      _gCurrent = _gHistory.pop();
+      frame.src = _gCurrent;
+      updateNav();
+    });
+
+    // Forward
+    fwdBtn.addEventListener("click", function(){
+      if(!_gFuture.length) return;
+      _gHistory.push(_gCurrent);
+      _gCurrent = _gFuture.shift();
+      frame.src = _gCurrent;
+      updateNav();
+    });
+
+    // Home (Google)
+    homeBtn.addEventListener("click", function(){
+      gNavigate("https://www.google.com?igu=1");
+    });
+
+    // URL bar: Enter to navigate
+    urlInput.addEventListener("keydown", function(e){
+      if(e.key !== "Enter") return;
+      var val = urlInput.value.trim(); if(!val) return;
+      // Bookmarklet support
+      if(/^javascript:/i.test(val)){
+        try{ frame.contentWindow.eval(val.replace(/^javascript:/i,"")); }catch(ex){ alert("Bookmarklet error: "+ex); }
+        return;
+      }
+      if(!/^https?:\/\//i.test(val)) val = "https://"+val;
+      gNavigate(val);
+      urlInput.blur();
+    });
+    urlInput.addEventListener("focus", function(){ urlInput.select(); });
+
+    updateNav();
+  }
+
+  function renderBookmarks(bms, frame){
+    var list = document.getElementById("uf-bm-list");
+    var addBtn = document.getElementById("uf-bm-add");
+    if(!list) return;
+    list.innerHTML = "";
+    bms.forEach(function(bm, i){
+      var span = document.createElement("span");
+      span.className = "uf-bm";
+      span.textContent = bm.title;
+      span.title = bm.url;
+      // Click: navigate iframe
+      span.addEventListener("click", function(e){
+        if(e.ctrlKey){ window.open(bm.url,"_blank"); return; }
+        var f = document.getElementById("uf-games-frame"); if(!f) return;
+        if(_gCurrent && _gCurrent !== bm.url){ _gHistory.push(_gCurrent); _gFuture=[]; }
+        _gCurrent = bm.url;
+        f.src = bm.url;
+        document.getElementById("uf-games-url").value = bm.url;
+        document.getElementById("uf-g-back").disabled = _gHistory.length===0;
+        document.getElementById("uf-g-fwd").disabled  = true;
+        // Switch to games tab
+        document.querySelectorAll(".uf-tab").forEach(function(t){ t.classList.remove("on"); });
+        document.querySelectorAll(".uf-sec").forEach(function(s){ s.classList.remove("on"); });
+        document.querySelector("[data-tab='games']").classList.add("on");
+        document.getElementById("uf-tab-games").classList.add("on");
+      });
+      // Right-click to edit/delete
+      span.addEventListener("contextmenu", function(e){
+        e.preventDefault();
+        var newTitle = prompt("Bookmark name:", bm.title); if(newTitle === null) return;
+        var newUrl   = prompt("Bookmark URL:",  bm.url);   if(newUrl   === null) return;
+        bms[i] = { title: newTitle.trim()||bm.title, url: newUrl.trim()||bm.url };
+        saveBookmarks(bms);
+        renderBookmarks(bms, frame);
+      });
+      list.appendChild(span);
+    });
+    // Add bookmark button
+    if(addBtn){
+      addBtn.onclick = function(){
+        var currentUrl = document.getElementById("uf-games-url").value.trim() || _gCurrent || "";
+        var newTitle = prompt("Bookmark name:", currentUrl.replace(/^https?:\/\//,"").split("/")[0]);
+        if(!newTitle) return;
+        var newUrl = prompt("URL:", currentUrl);
+        if(!newUrl) return;
+        bms.push({ title:newTitle.trim(), url:newUrl.trim() });
+        saveBookmarks(bms);
+        renderBookmarks(bms, frame);
+      };
+    }
   }
 
   // Helper: derive origin from domain string and push
