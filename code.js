@@ -377,19 +377,27 @@
       // Games tab
       "#uf-tab-games{flex:1;min-height:0}",
       "#uf-games-wrap{display:flex;flex-direction:column;flex:1;min-height:0;background:#f9f9fb}",
-      "#uf-games-nav{display:flex;align-items:center;gap:4px;padding:5px 8px;background:#fff;border-bottom:1px solid #c8c8cc;flex-shrink:0}",
-      "#uf-games-nav .uf-btn.icon{font-size:16px;padding:3px 7px}",
-      "#uf-games-url{flex:1;border:1px solid #c8c8cc;border-radius:3px;padding:4px 8px;font-size:12px;font-family:inherit;outline:none;color:#1c1b22;background:#f9f9fb;transition:border-color .12s}",
-      "#uf-games-url:focus{border-color:#7f0000;background:#fff;box-shadow:0 0 0 1px rgba(127,0,0,.15)}",
-      "#uf-games-frame{flex:1;width:100%;border:none;background:#fff;display:block}",
-      // Bookmarks bar
-      "#uf-bm-bar{display:flex;align-items:center;gap:2px;padding:3px 8px;background:#f9f9fb;border-bottom:1px solid #e0e0e4;flex-shrink:0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}",
+      "#uf-games-wrap.fs-mode #uf-games-nav,#uf-games-wrap.fs-mode #uf-bm-bar{display:none}",
+      "#uf-games-wrap.fs-mode #uf-games-frame{flex:1}",
+      // Nav bar
+      "#uf-games-nav{display:flex;align-items:center;gap:2px;padding:4px 6px;background:#fff;border-bottom:1px solid #c8c8cc;flex-shrink:0}",
+      ".uf-gn-btn{border:none;background:transparent;border-radius:3px;width:26px;height:26px;font-size:14px;cursor:pointer;color:#5f6368;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .1s,color .1s;padding:0}",
+      ".uf-gn-btn:hover{background:#f0f0f4;color:#1c1b22}",
+      ".uf-gn-btn:disabled{color:#d0d0d0;cursor:default}",
+      "#uf-games-url{flex:1;border:1px solid #c8c8cc;border-radius:10px;padding:4px 10px;font-size:12px;font-family:inherit;outline:none;color:#1c1b22;background:#f9f9fb;margin:0 4px;transition:border-color .12s,background .12s}",
+      "#uf-games-url:focus{border-color:#7f0000;background:#fff;box-shadow:0 0 0 1px rgba(127,0,0,.12);border-radius:3px}",
+      // Bookmarks bar - horizontal, compact
+      "#uf-bm-bar{display:flex;align-items:center;gap:0;padding:0 4px;background:#f9f9fb;border-bottom:1px solid #e0e0e4;flex-shrink:0;height:26px;overflow-x:auto;scrollbar-width:none}",
       "#uf-bm-bar::-webkit-scrollbar{display:none}",
-      ".uf-bm{display:flex;align-items:center;gap:4px;padding:2px 9px;border-radius:3px;font-size:11.5px;color:#1c1b22;cursor:pointer;white-space:nowrap;border:1px solid transparent;transition:background .1s}",
-      ".uf-bm:hover{background:#e8e8ed;border-color:#c8c8cc}",
-      ".uf-bm-add{color:#6f6e77;font-size:15px;padding:1px 6px;border-radius:3px;cursor:pointer;transition:background .1s;flex-shrink:0;user-select:none}",
-      ".uf-bm-add:hover{background:#e8e8ed}",
-      ".uf-bm-sep{width:1px;height:14px;background:#c8c8cc;margin:0 2px;flex-shrink:0}"
+      "#uf-bm-list{display:flex;align-items:center;gap:0;flex:1;min-width:0}",
+      ".uf-bm{display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:3px;font-size:11.5px;color:#1c1b22;cursor:pointer;white-space:nowrap;max-width:140px;transition:background .1s;height:22px;user-select:none}",
+      ".uf-bm:hover{background:#e8e8ed}",
+      ".uf-bm img{width:14px;height:14px;flex-shrink:0;object-fit:contain}",
+      ".uf-bm-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".uf-bm-add{border:none;background:transparent;font-size:16px;color:#6f6e77;cursor:pointer;padding:0 6px;height:22px;border-radius:3px;flex-shrink:0;transition:background .1s;line-height:1}",
+      ".uf-bm-add:hover{background:#e8e8ed;color:#1c1b22}",
+      // Iframe
+      "#uf-games-frame{flex:1;width:100%;border:none;background:#fff;display:block;min-height:0}"
     ].join("\n");
   }
 
@@ -402,7 +410,7 @@
         +'<div class="uf-tabs">'
           +'<div class="uf-tab on" data-tab="home">Home</div>'
           +'<div class="uf-tab" data-tab="scripts">My Scripts</div>'
-          +'<div class="uf-tab" data-tab="games">Games</div>'
+          +'<div class="uf-tab" data-tab="games">Iframe</div>'
           +'<div class="uf-tab" data-tab="keys">Shortcuts</div>'
         +'</div>'
         +'<div class="uf-top-actions">'
@@ -419,18 +427,17 @@
             +'<img src="'+iconUrl+'" width="48" height="48" style="object-fit:contain;flex-shrink:0">'
             +'<div>'
               +'<h1>u<b>Features</b></h1>'
-              +'<div class="uf-home-credit">By <a href="#" title="Roblox: studiocompile | Discord: @roblox_studio">StudioCompile</a> &mdash; Roblox: studiocompile &middot; Discord: @roblox_studio</div>'
+              +'<div class="uf-home-credit">By StudioCompile &mdash; Roblox: studiocompile &middot; Discord: @roblox_studio</div>'
             +'</div>'
           +'</div>'
           +'<div class="uf-sh">Features</div>'
           +'<div class="uf-feat-grid">'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9998;</span>Script Manager</div><div class="uf-feat-desc">Save JavaScript snippets that auto-run on specific sites every page load. Edit, toggle, or delete any time from My Scripts.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#8593;</span>Script Sync</div><div class="uf-feat-desc">Scripts are stored on google.com and pushed to target sites automatically via a discreet bridge window. Updates sync on save, toggle, or delete.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9726;</span>Securly Blocker</div><div class="uf-feat-desc">Automatically removes Securly overlay elements on every page load using a MutationObserver so they can\'t come back.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#128269;</span>Chii Debugger</div><div class="uf-feat-desc">Injects the Chii remote DevTools inspector into any page. Dark background loads immediately so you know it activated. Ctrl+Shift+I to toggle.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#127918;</span>Games Tab</div><div class="uf-feat-desc">Full-page iframe browser with back/forward history, editable bookmarks, and a URL bar. Default bookmarks: AZ Games, Zap Games, and Pizza Edition.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#128203;</span>Bookmarklet Runner</div><div class="uf-feat-desc">Copy any javascript: URL then Ctrl+V outside a text field to run it on the current page instantly.</div></div>'
-            +'<div class="uf-feat"><div class="uf-feat-title"><span class="uf-feat-icon">&#9000;</span>Shortcuts</div><div class="uf-feat-desc">Ctrl+` opens settings. Ctrl+Shift+I toggles Chii. See the Shortcuts tab for the full list.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Script Manager</div><div class="uf-feat-desc">Save JavaScript snippets that run automatically on specific sites every page load. Edit, toggle, or delete scripts at any time from the My Scripts tab.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Script Sync</div><div class="uf-feat-desc">Scripts are stored on google.com and pushed to target sites via a discreet bridge window. Changes sync automatically on save, toggle, or delete.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Securly Blocker</div><div class="uf-feat-desc">Removes Securly overlay elements on every page load. A MutationObserver watches for them being re-added and removes them immediately.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Chii Debugger</div><div class="uf-feat-desc">Injects the Chii remote DevTools panel into any page. Dark background appears immediately on activation. Use Ctrl+Shift+I to toggle.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Iframe Browser</div><div class="uf-feat-desc">A full-page iframe browser with back and forward history, editable bookmarks, a URL bar, and a fullscreen mode that hides all chrome.</div></div>'
+            +'<div class="uf-feat"><div class="uf-feat-title">Bookmarklet Runner</div><div class="uf-feat-desc">Copy any javascript: URL, then press Ctrl+V outside a text field to run it on the current page. Also works in the iframe URL bar.</div></div>'
           +'</div>'
         +'</div></div>'
 
@@ -452,24 +459,23 @@
           +'<div class="uf-card" id="uf-slist"></div>'
         +'</div></div>'
 
-        // GAMES TAB
+        // IFRAME TAB
         +'<div class="uf-sec" id="uf-tab-games">'
           +'<div id="uf-games-wrap">'
-            // Nav bar
+            // Nav bar - back, forward, url input, fullscreen
             +'<div id="uf-games-nav">'
-              +'<button class="uf-btn icon" id="uf-g-back" title="Back">&#8592;</button>'
-              +'<button class="uf-btn icon" id="uf-g-fwd" title="Forward">&#8594;</button>'
-              +'<button class="uf-btn icon" id="uf-g-home" title="Google" style="font-size:12px;padding:3px 8px">G</button>'
-              +'<input id="uf-games-url" type="text" spellcheck="false" autocomplete="off" placeholder="Enter URL or press a bookmark…">'
+              +'<button class="uf-gn-btn" id="uf-g-back" title="Back" disabled>&#8592;</button>'
+              +'<button class="uf-gn-btn" id="uf-g-fwd"  title="Forward" disabled>&#8594;</button>'
+              +'<input id="uf-games-url" type="text" spellcheck="false" autocomplete="off" placeholder="Enter URL and press Enter&hellip;">'
+              +'<button class="uf-gn-btn" id="uf-g-fs" title="Focus iframe / exit focus">&#9974;</button>'
             +'</div>'
-            // Bookmarks bar
+            // Bookmarks bar - horizontal with favicons
             +'<div id="uf-bm-bar">'
-              +'<span id="uf-bm-list"></span>'
-              +'<span class="uf-bm-sep"></span>'
-              +'<span class="uf-bm-add" id="uf-bm-add" title="Add bookmark">+</span>'
+              +'<div id="uf-bm-list"></div>'
+              +'<button class="uf-bm-add" id="uf-bm-add" title="Bookmark current page">+</button>'
             +'</div>'
-            // Iframe
-            +'<iframe id="uf-games-frame" src="https://www.google.com?igu=1" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"></iframe>'
+            // Iframe fills remaining space
+            +'<iframe id="uf-games-frame" src="https://www.google.com?igu=1" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-presentation"></iframe>'
           +'</div>'
         +'</div>'
 
@@ -658,9 +664,10 @@
     renderScripts(); updateBar();
   }
 
-  // ── Games tab ────────────────────────────────────────────────────
+  // ── Games / Iframe tab ───────────────────────────────────────────
   var BM_KEY = "__uFeaturesBookmarks";
-  var _gHistory = [], _gFuture = [], _gCurrent = "https://www.google.com?igu=1";
+  var _gCurrent = "https://www.google.com?igu=1";
+  var _gFS = false; // fullscreen mode state
 
   function loadBookmarks(){
     try{ return JSON.parse(localStorage.getItem(BM_KEY)||"null"); }catch(e){ return null; }
@@ -673,164 +680,156 @@
     { title:"Pizza Edition",  url:"https://learncodingdaily.com" }
   ];
 
+  function faviconUrl(url){
+    try{
+      var origin = new URL(url).origin;
+      return "https://www.google.com/s2/favicons?domain="+encodeURIComponent(origin)+"&sz=32";
+    }catch(e){ return ""; }
+  }
+
   function wireGames(){
     var frame   = document.getElementById("uf-games-frame");
     var urlInput= document.getElementById("uf-games-url");
     var backBtn = document.getElementById("uf-g-back");
     var fwdBtn  = document.getElementById("uf-g-fwd");
-    var homeBtn = document.getElementById("uf-g-home");
+    var fsBtn   = document.getElementById("uf-g-fs");
+    var wrap    = document.getElementById("uf-games-wrap");
 
     if(!frame) return;
 
-    // Load or init bookmarks
+    // Init bookmarks
     var bms = loadBookmarks() || DEFAULT_BOOKMARKS.slice();
-    renderBookmarks(bms, frame);
+    renderBookmarks(bms, frame, urlInput);
 
-    // Update URL bar
-    function updateNav(){
-      urlInput.value = _gCurrent || "";
-      backBtn.disabled = _gHistory.length === 0;
-      fwdBtn.disabled  = _gFuture.length === 0;
-    }
-
-    // Navigate iframe to URL, managing history
-    function gNavigate(url, pushHist){
-      if(pushHist !== false && _gCurrent && _gCurrent !== url){
-        _gHistory.push(_gCurrent);
-        _gFuture = [];
-      }
-      _gCurrent = url;
-      frame.src = url;
-      updateNav();
-    }
-
-    // Watch iframe src changes (set by iframeMenu.js or by load events)
-    // Poll src since cross-origin events are limited
-    var _lastObservedSrc = frame.src;
-    setInterval(function(){
-      var s;
-      try{ s = frame.contentWindow.location.href; }catch(e){ s = null; }
-      // Fallback: read attribute (works same-origin or if iframeMenu updates it)
-      if(!s || s === "about:blank" || s === "about:srcdoc"){
-        s = frame.getAttribute("src") || _gCurrent;
-      }
-      if(s && s !== _lastObservedSrc && s !== "about:blank" && s !== "about:srcdoc"){
-        _lastObservedSrc = s;
-        if(_gCurrent && _gCurrent !== s){
-          _gHistory.push(_gCurrent);
-          _gFuture = [];
-        }
-        _gCurrent = s;
-        if(document.activeElement !== urlInput) urlInput.value = s;
-        backBtn.disabled = _gHistory.length === 0;
-        fwdBtn.disabled  = _gFuture.length === 0;
-      }
-    }, 400);
-
-    // Also listen for postMessage from iframe (iframeMenu.js sends __ifm_urlChange)
+    // Update url bar and button states from iframe.js navstate messages
     window.addEventListener("message", function(e){
       var d = e.data; if(!d || typeof d !== "object") return;
-      if(d.type === "__ifm_urlChange" && d.url){
-        var url = d.url;
-        if(url === _gCurrent) return;
-        _gHistory.push(_gCurrent);
-        _gFuture = [];
+      // iframe.js sends __ifm_navstate to the iframe side, but we're the host page here.
+      // We drive back/fwd ourselves via __ifm_goback/__ifm_goforward sent to frame.
+      if(d.type === "__ifm_currenturl"){
+        var url = d.url; if(!url) return;
         _gCurrent = url;
         if(document.activeElement !== urlInput) urlInput.value = url;
-        backBtn.disabled = false;
-        fwdBtn.disabled  = true;
+      }
+      if(d.type === "__ifm_navstate"){
+        backBtn.disabled = !d.canBack;
+        fwdBtn.disabled  = !d.canFwd;
+        if(d.url && document.activeElement !== urlInput) urlInput.value = d.url;
       }
     });
 
-    // Back
+    // Back / Forward — send to iframe (iframe.js handles history on host side)
     backBtn.addEventListener("click", function(){
-      if(!_gHistory.length) return;
-      _gFuture.unshift(_gCurrent);
-      _gCurrent = _gHistory.pop();
-      frame.src = _gCurrent;
-      updateNav();
+      try{ frame.contentWindow.postMessage({type:"__ifm_goback"},"*"); }catch(e){}
     });
-
-    // Forward
     fwdBtn.addEventListener("click", function(){
-      if(!_gFuture.length) return;
-      _gHistory.push(_gCurrent);
-      _gCurrent = _gFuture.shift();
-      frame.src = _gCurrent;
-      updateNav();
+      try{ frame.contentWindow.postMessage({type:"__ifm_goforward"},"*"); }catch(e){}
     });
 
-    // Home (Google)
-    homeBtn.addEventListener("click", function(){
-      gNavigate("https://www.google.com?igu=1");
+    // Fullscreen toggle — hides nav/bookmarks bar, iframe fills tab
+    fsBtn.addEventListener("click", function(){
+      _gFS = !_gFS;
+      if(_gFS){
+        wrap.classList.add("fs-mode");
+        fsBtn.title = "Exit focus mode";
+        fsBtn.textContent = "\u2715";
+      } else {
+        wrap.classList.remove("fs-mode");
+        fsBtn.title = "Focus iframe";
+        fsBtn.innerHTML = "&#9974;";
+      }
     });
 
-    // URL bar: Enter to navigate
+    // URL bar
+    urlInput.value = _gCurrent;
+    urlInput.addEventListener("focus", function(){ urlInput.select(); });
     urlInput.addEventListener("keydown", function(e){
+      if(e.key === "Escape"){ urlInput.value = _gCurrent; urlInput.blur(); return; }
       if(e.key !== "Enter") return;
+      e.preventDefault();
       var val = urlInput.value.trim(); if(!val) return;
-      // Bookmarklet support
+      // Bookmarklet — eval inside iframe
       if(/^javascript:/i.test(val)){
-        try{ frame.contentWindow.eval(val.replace(/^javascript:/i,"")); }catch(ex){ alert("Bookmarklet error: "+ex); }
-        return;
+        try{ frame.contentWindow.eval(val.replace(/^javascript:/i,"")); }
+        catch(ex){ alert("Bookmarklet error: "+ex); }
+        urlInput.blur(); return;
       }
       if(!/^https?:\/\//i.test(val)) val = "https://"+val;
-      gNavigate(val);
+      // Send navigate message — iframe.js will pick it up on the iframe side
+      // But since we're the host, just set src directly via the iframe.js host protocol
+      try{ frame.contentWindow.postMessage({type:"__ifm_navigate",url:val},"*"); }catch(ex){}
+      // Fallback: direct src
+      _gCurrent = val;
+      frame.src = val;
       urlInput.blur();
     });
-    urlInput.addEventListener("focus", function(){ urlInput.select(); });
-
-    updateNav();
   }
 
-  function renderBookmarks(bms, frame){
+  function renderBookmarks(bms, frame, urlInput){
     var list = document.getElementById("uf-bm-list");
     var addBtn = document.getElementById("uf-bm-add");
     if(!list) return;
     list.innerHTML = "";
+
     bms.forEach(function(bm, i){
       var span = document.createElement("span");
       span.className = "uf-bm";
-      span.textContent = bm.title;
       span.title = bm.url;
-      // Click: navigate iframe
+
+      // Favicon
+      var fav = document.createElement("img");
+      fav.src = faviconUrl(bm.url);
+      fav.width = 14; fav.height = 14;
+      fav.onerror = function(){ this.style.display="none"; };
+
+      var label = document.createElement("span");
+      label.className = "uf-bm-label";
+      label.textContent = bm.title;
+
+      span.appendChild(fav);
+      span.appendChild(label);
+
+      // Left click: navigate iframe
       span.addEventListener("click", function(e){
-        if(e.ctrlKey){ window.open(bm.url,"_blank"); return; }
+        if(e.ctrlKey || e.metaKey){ window.open(bm.url,"_blank"); return; }
         var f = document.getElementById("uf-games-frame"); if(!f) return;
-        if(_gCurrent && _gCurrent !== bm.url){ _gHistory.push(_gCurrent); _gFuture=[]; }
-        _gCurrent = bm.url;
-        f.src = bm.url;
-        document.getElementById("uf-games-url").value = bm.url;
-        document.getElementById("uf-g-back").disabled = _gHistory.length===0;
-        document.getElementById("uf-g-fwd").disabled  = true;
-        // Switch to games tab
+        // Switch to iframe tab first
         document.querySelectorAll(".uf-tab").forEach(function(t){ t.classList.remove("on"); });
         document.querySelectorAll(".uf-sec").forEach(function(s){ s.classList.remove("on"); });
         document.querySelector("[data-tab='games']").classList.add("on");
         document.getElementById("uf-tab-games").classList.add("on");
+        // Navigate
+        _gCurrent = bm.url;
+        f.src = bm.url;
+        if(urlInput) urlInput.value = bm.url;
       });
-      // Right-click to edit/delete
+
+      // Right-click: edit/delete
       span.addEventListener("contextmenu", function(e){
         e.preventDefault();
-        var newTitle = prompt("Bookmark name:", bm.title); if(newTitle === null) return;
-        var newUrl   = prompt("Bookmark URL:",  bm.url);   if(newUrl   === null) return;
-        bms[i] = { title: newTitle.trim()||bm.title, url: newUrl.trim()||bm.url };
-        saveBookmarks(bms);
-        renderBookmarks(bms, frame);
+        var action = prompt("Edit bookmark — enter new name:title|url — or type DELETE to remove\n\nCurrent: "+bm.title+" | "+bm.url, bm.title+"|"+bm.url);
+        if(action === null) return;
+        if(action.trim().toUpperCase() === "DELETE"){
+          bms.splice(i,1); saveBookmarks(bms); renderBookmarks(bms,frame,urlInput); return;
+        }
+        var parts = action.split("|");
+        bms[i] = { title:(parts[0]||bm.title).trim(), url:(parts[1]||bm.url).trim() };
+        saveBookmarks(bms); renderBookmarks(bms,frame,urlInput);
       });
+
       list.appendChild(span);
     });
+
     // Add bookmark button
     if(addBtn){
       addBtn.onclick = function(){
-        var currentUrl = document.getElementById("uf-games-url").value.trim() || _gCurrent || "";
-        var newTitle = prompt("Bookmark name:", currentUrl.replace(/^https?:\/\//,"").split("/")[0]);
-        if(!newTitle) return;
-        var newUrl = prompt("URL:", currentUrl);
-        if(!newUrl) return;
-        bms.push({ title:newTitle.trim(), url:newUrl.trim() });
-        saveBookmarks(bms);
-        renderBookmarks(bms, frame);
+        var currentUrl = (urlInput && urlInput.value.trim()) || _gCurrent || "";
+        var defaultName = "";
+        try{ defaultName = new URL(currentUrl).hostname.replace(/^www\./,""); }catch(e){}
+        var t = prompt("Bookmark name:", defaultName); if(!t) return;
+        var u = prompt("URL:", currentUrl); if(!u) return;
+        bms.push({ title:t.trim(), url:u.trim() });
+        saveBookmarks(bms); renderBookmarks(bms,frame,urlInput);
       };
     }
   }
