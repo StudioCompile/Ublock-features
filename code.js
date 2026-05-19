@@ -54,105 +54,101 @@
 
   // ── Bridge: push scripts into another site's localStorage ────────
   //
-  // Protocol:
-  //   1. Broadcast "uf_ping" to all open tabs via BroadcastChannel if available.
-  //      Any tab on the target origin that has uFeatures injected will respond
-  //      with "uf_pong" including its tabId. We then postMessage it directly.
-  //   2. If no tab responds within 600ms, open a NEW TAB (not a window) to
-  //      the target origin with ?__ufb=1. The bridge page takeover runs
-  //      immediately via document.write, stripping all HTML.
-  //   3. The bridge tab saves the data and posts uf_bridge_ack back.
-  //   4. Only on ack do we call onDone. On timeout we call onDone with error.
+  // The bridge tab is a page on the TARGET origin that has uFeatures injected.
+  // We open it, wait for it to signal ready (it posts uf_bridge_ready to opener),
+  // then send the payload. It saves and posts uf_bridge_ack back.
+  // window.name persists across redirects — if the tab redirects, uFeatures
+  // still recognises it as a bridge tab and takes over the page immediately.
+  //
+  // We use "*" as postMessage target since we control both sides and need to
+  // send to the tab regardless of what URL it ended up on after redirects.
 
   function pushToSite(origin, scripts, onDone){
-    var payload = { type:"uf_bridge_set", key:SITE_KEY, scripts:scripts };
     var done = false;
+    var tab = null;
+    var poll = null;
+    var timeoutTimer = null;
 
-    function succeed(){
-      if(done) return; done=true;
-      if(onDone) onDone(null);
+    function finish(err){
+      if(done) return;
+      done = true;
+      clearInterval(poll);
+      clearTimeout(timeoutTimer);
+      window.removeEventListener("message", onMsg);
+      if(!err){
+        // Close tab after a moment so user sees "Saved ✓"
+        setTimeout(function(){ try{ tab.close(); }catch(e){} }, 800);
+      } else {
+        try{ tab.close(); }catch(e){}
+      }
+      if(onDone) onDone(err||null);
     }
-    function fail(msg){
-      if(done) return; done=true;
-      console.warn("[uFeatures] push failed:", msg);
-      if(onDone) onDone(msg||"failed");
+
+    function onMsg(e){
+      var d = e.data; if(!d || typeof d !== "object") return;
+      // Must come from our tab
+      if(e.source !== tab) return;
+
+      if(d.type === "uf_bridge_ready"){
+        // Tab is ready — send the payload
+        clearInterval(poll); poll = null;
+        try{
+          tab.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, "*");
+        }catch(ex){ finish("send-failed"); }
+      }
+
+      if(d.type === "uf_bridge_ack"){
+        if(d.error){ finish("save-error: "+d.error); }
+        else { finish(null); }
+      }
     }
 
-    // Listen for ack from any source at that origin
-    function handleMsg(e){
-      if(e.origin !== origin) return;
-      if(!e.data || e.data.type !== "uf_bridge_ack") return;
-      window.removeEventListener("message", handleMsg);
-      succeed();
-    }
-    window.addEventListener("message", handleMsg);
+    window.addEventListener("message", onMsg);
 
-    // Step 1: Try BroadcastChannel to reach an already-open tab on that origin.
-    // We can't BroadcastChannel cross-origin, but we CAN try postMessage to
-    // known windows. Instead, we use a shared channel name the target listens on.
-    // Since cross-origin BroadcastChannel doesn't work, we skip directly to
-    // attempting a fetch ping to see if the site is reachable, then open a tab.
-
-    // Step 1 (simplified): try to find a tab by checking sessionStorage keys
-    // via a quick probe message to window.open with the stable name.
-    // window.open with a name will FOCUS an existing tab at any URL with that name —
-    // but won't let us postMessage it cross-origin. So we just open the tab.
-
-    // Open a new tab (not popup window) to the bridge URL.
-    // The tab's title and content get replaced by document.write immediately.
-    var winName = "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g, "_");
-    var tab = window.open(origin + "/?__ufb=1", winName);
+    // Open tab — no size args = opens as a real browser tab
+    var winName = "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g,"_");
+    tab = window.open(origin + "/?__ufb=1", winName);
     if(!tab){
-      window.removeEventListener("message", handleMsg);
-      fail("popup blocked");
-      alert("[uFeatures] Tab blocked — please allow popups/tabs from this page.");
+      window.removeEventListener("message", onMsg);
+      if(onDone) onDone("blocked");
+      setSt("Popup blocked \u2014 allow popups from google.com", "#cc0000");
       return;
     }
 
-    // Poll: send the payload repeatedly until ack or timeout.
-    // The bridge tab will ack as soon as it processes the message.
-    var attempts = 0;
-    var poll = setInterval(function(){
+    // Poll until tab signals ready — handles case where tab takes a moment to load
+    // and the first few postMessages are missed. We send a ping every 200ms.
+    var pingAttempts = 0;
+    poll = setInterval(function(){
       if(done){ clearInterval(poll); return; }
-      if(attempts > 80){ // 8 seconds
-        clearInterval(poll);
-        window.removeEventListener("message", handleMsg);
-        try{ tab.close(); }catch(e){}
-        fail("timeout");
-        return;
-      }
-      try{ tab.postMessage(payload, origin); }catch(e){}
-      attempts++;
-    }, 100);
+      try{ tab.postMessage({ type:"uf_bridge_ping" }, "*"); }catch(e){}
+      pingAttempts++;
+    }, 200);
 
-    // On ack: clear poll, close tab after showing Saved
-    var origHandler = handleMsg;
-    window.removeEventListener("message", origHandler);
-    window.addEventListener("message", function ackHandler(e){
-      if(e.origin !== origin) return;
-      if(!e.data || e.data.type !== "uf_bridge_ack") return;
-      window.removeEventListener("message", ackHandler);
-      clearInterval(poll);
-      // Let the tab show "Saved ✓" briefly then close
-      setTimeout(function(){ try{ tab.close(); }catch(ex){} }, 700);
-      succeed();
-    });
+    // Hard timeout — 10 seconds
+    timeoutTimer = setTimeout(function(){
+      if(!done) finish("timeout");
+    }, 10000);
   }
 
-  // ── Bridge listener: every page receives pushes ───────────────────
+  // ── Bridge listener: every page with uFeatures receives bridge messages ──
+  // When this page is a bridge tab, it responds to pings and saves data.
   window.addEventListener("message", function(e){
-    var d = e.data; if(!d) return;
+    var d = e.data; if(!d || typeof d !== "object") return;
+
+    // Respond to ping from opener — signals we are ready
+    if(d.type === "uf_bridge_ping"){
+      try{ e.source.postMessage({ type:"uf_bridge_ready" }, "*"); }catch(ex){}
+    }
+
+    // Receive data to save
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
       try{
         localStorage.setItem(d.key, JSON.stringify(d.scripts));
-        // Send ack — MUST use e.source and e.origin exactly
-        e.source.postMessage({ type:"uf_bridge_ack" }, e.origin);
-        // Update status text if we're the bridge page
+        e.source.postMessage({ type:"uf_bridge_ack" }, "*");
         var st = document.getElementById("__uf_bridge_st");
-        if(st){ st.textContent = "Saved \u2713"; st.style.color = "#1a7340"; }
+        if(st){ st.textContent = "Saved \u2713"; st.style.color = "#1e7e34"; }
       }catch(ex){
-        // Still try to ack even if save failed, but with error flag
-        try{ e.source.postMessage({ type:"uf_bridge_ack", error: String(ex) }, e.origin); }catch(e2){}
+        try{ e.source.postMessage({ type:"uf_bridge_ack", error:String(ex) }, "*"); }catch(e2){}
       }
     }
   });
@@ -419,11 +415,9 @@
       ".uf-home-hero h1{font-size:22px;font-weight:300;color:#1c1b22;letter-spacing:-.3px}",
       ".uf-home-hero h1 b{font-weight:700;color:#7f0000}",
       ".uf-home-credit{font-size:11px;color:#adadb1;margin-top:2px}",
-      ".uf-feat-list{margin-top:4px;display:flex;flex-direction:column;gap:0}",
-      ".uf-feat-item{padding:8px 0;border-bottom:1px solid #e0e0e4;font-size:13px;color:#1c1b22;line-height:1.6}",
-      ".uf-feat-item:last-child{border-bottom:none}",
-      ".uf-feat-item b{font-weight:600;color:#1c1b22}",
-      ".uf-feat-item span{color:#6f6e77}"
+      ".uf-feat-text p{font-size:13px;color:#3c3c43;line-height:1.7;margin-bottom:10px}",
+      ".uf-feat-text p:last-child{margin-bottom:0}",
+      ".uf-feat-text p b{font-weight:600;color:#1c1b22}"
     ].join("\n");
   }
 
@@ -455,13 +449,13 @@
             +'</div>'
           +'</div>'
           +'<div class="uf-sh">Features</div>'
-          +'<div class="uf-card"><div style="padding:4px 0">'
-            +'<div class="uf-feat-item"><b>Script Manager</b> <span>&mdash; Save JavaScript snippets that run automatically on specific sites every page load. Edit, toggle, or delete from My Scripts.</span></div>'
-            +'<div class="uf-feat-item"><b>Script Sync</b> <span>&mdash; Scripts are stored on google.com and pushed to target sites via a bridge tab. Changes sync on save, toggle, and delete.</span></div>'
-            +'<div class="uf-feat-item"><b>Securly Blocker</b> <span>&mdash; Removes Securly overlay elements on load and watches via MutationObserver so they cannot come back.</span></div>'
-            +'<div class="uf-feat-item"><b>Chii Debugger</b> <span>&mdash; Injects the Chii remote DevTools panel into any page with a dark background so you know it activated. Ctrl+Shift+I to toggle.</span></div>'
-            +'<div class="uf-feat-item"><b>Bookmarklet Runner</b> <span>&mdash; Copy any javascript: URL then press Ctrl+V outside a text field to run it on the current page.</span></div>'
-          +'</div></div>'
+          +'<div class="uf-feat-text">'
+            +'<p><b>Script Manager</b> &mdash; Save JavaScript snippets that run automatically on specific sites every page load. Edit, toggle, or delete from My Scripts.</p>'
+            +'<p><b>Script Sync</b> &mdash; Scripts are stored on google.com and pushed to target sites via a bridge tab. Changes sync on save, toggle, and delete.</p>'
+            +'<p><b>Securly Blocker</b> &mdash; Removes Securly overlay elements on load and watches via MutationObserver so they cannot come back.</p>'
+            +'<p><b>Chii Debugger</b> &mdash; Injects the Chii remote DevTools panel into any page with a dark background so you know it activated. Ctrl+Shift+I to toggle.</p>'
+            +'<p><b>Bookmarklet Runner</b> &mdash; Copy any javascript: URL then press Ctrl+V outside a text field to run it on the current page.</p>'
+          +'</div>'
         +'</div></div>'
 
         // SCRIPTS TAB
@@ -626,7 +620,8 @@
 
       var arr=siteLoad();
       var idx=-1;
-      arr.forEach(function(s,i){ if(s.name===(_editingName||name)) idx=i; });
+      // Only replace an existing script if we're explicitly editing one
+      if(_editingName) arr.forEach(function(s,i){ if(s.name===_editingName) idx=i; });
       var entry={name:name,domain:domain,code:code,enabled:true};
       if(idx>=0) arr[idx]=entry; else arr.push(entry);
       siteSave(arr);
@@ -661,18 +656,25 @@
 
   // Helper: derive origin from domain string and push
   function pushForDomain(domain, arr){
-    if(!domain){ setSt("Saved.","#6f6e77"); return; }
+    if(!domain){ setSt("Saved (no domain — not pushed to any site)","#6f6e77"); return; }
     var rawDomain=domain.split(",")[0].trim().replace(/^\*\./,"");
     var slash=rawDomain.indexOf("/"); if(slash!==-1) rawDomain=rawDomain.slice(0,slash);
-    if(!rawDomain){ setSt("Saved.","#6f6e77"); return; }
+    if(!rawDomain){ setSt("Saved","#6f6e77"); return; }
     var known=getSites().filter(function(o){ return o.indexOf(rawDomain)!==-1; });
     var origins=known.length ? known : ["https://"+rawDomain];
-    var rem=origins.length;
-    setSt("Saving & pushing…","#6f6e77");
+    var rem=origins.length, failed=0;
+    setSt("Pushing to "+rawDomain+"\u2026","#6f6e77");
     origins.forEach(function(origin){
       addSite(origin); updateBar();
       var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
-      pushToSite(origin,toSend,function(){ rem--; if(rem<=0) setSt("Saved & pushed \u2713","green"); });
+      pushToSite(origin, toSend, function(err){
+        rem--;
+        if(err) failed++;
+        if(rem<=0){
+          if(failed===0) setSt("Saved \u2713","#1e7e34");
+          else setSt("Saved locally but push to "+rawDomain+" failed ("+failed+" error"+(failed>1?"s":"")+")","#cc0000");
+        }
+      });
     });
   }
 
