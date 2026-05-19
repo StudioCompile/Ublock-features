@@ -12,8 +12,17 @@
 
   var IS_SETTINGS = (
     (location.hostname === "www.google.com" || location.hostname === "google.com") &&
-    location.pathname === "/ufeatures"
+    location.pathname.indexOf("/ufeatures") === 0
   );
+
+  // Map URL paths to tab names
+  var PATH_TAB = {
+    "/ufeatures":          "home",
+    "/ufeatures/":         "home",
+    "/ufeatures/scripts":  "scripts",
+    "/ufeatures/shortcuts":"keys"
+  };
+  var TAB_PATH = { home:"/ufeatures", scripts:"/ufeatures/scripts", keys:"/ufeatures/shortcuts" };
 
   // ── Storage ───────────────────────────────────────────────────────
   function siteLoad(){
