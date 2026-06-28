@@ -82,7 +82,6 @@
         try{ tab.close(); }catch(e){}
       }
       if(onDone) onDone(err||null);
-      else if (err) setSt("Push failed: " + err, "#cc0000");
     }
 
     function onMsg(e){
