@@ -82,6 +82,7 @@
         try{ tab.close(); }catch(e){}
       }
       if(onDone) onDone(err||null);
+      else if (err) setSt("Push failed: " + err, "#cc0000");
     }
 
     function onMsg(e){
@@ -93,7 +94,7 @@
         // Tab is ready — send the payload
         clearInterval(poll); poll = null;
         try{
-          tab.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, "*");
+          tab.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, origin);
         }catch(ex){ finish("send-failed"); }
       }
 
@@ -137,18 +138,18 @@
 
     // Respond to ping from opener — signals we are ready
     if(d.type === "uf_bridge_ping"){
-      try{ e.source.postMessage({ type:"uf_bridge_ready" }, "*"); }catch(ex){}
+      try{ e.source.postMessage({ type:"uf_bridge_ready" }, e.origin); }catch(ex){}
     }
 
     // Receive data to save
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
       try{
         localStorage.setItem(d.key, JSON.stringify(d.scripts));
-        e.source.postMessage({ type:"uf_bridge_ack" }, "*");
+        e.source.postMessage({ type:"uf_bridge_ack" }, e.origin);
         var st = document.getElementById("__uf_bridge_st");
         if(st){ st.textContent = "Saved \u2713"; st.style.color = "#1e7e34"; }
       }catch(ex){
-        try{ e.source.postMessage({ type:"uf_bridge_ack", error:String(ex) }, "*"); }catch(e2){}
+        try{ e.source.postMessage({ type:"uf_bridge_ack", error:String(ex) }, e.origin); }catch(e2){}}
       }
     }
   });
