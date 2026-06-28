@@ -16,19 +16,12 @@
   var SITE_KEY  = "__uFeaturesScripts";   // per-site localStorage key
   var SITES_KEY = "__uFeaturesSites";     // list of known sites (google.com only)
   var chiiState = 0;
-  var _nameIdx  = 0;
   var _referrer = document.referrer ? new URL(document.referrer).hostname : "";
 
   var IS_SETTINGS = (
     (location.hostname === "www.google.com" || location.hostname === "google.com") &&
     location.pathname === "/ufeatures"
   );
-
-  // ── Name helper ─────────────────────────────────────────────────
-  function nextName(){
-    _nameIdx++;
-    return "Example Script" + (_nameIdx > 1 ? " " + _nameIdx : "");
-  }
 
   // ── Storage (per-site — direct localStorage) ─────────────────────
   function siteLoad(){
@@ -48,26 +41,23 @@
     var list = getSites();
     if(list.indexOf(origin) === -1){ list.push(origin); localStorage.setItem(SITES_KEY, JSON.stringify(list)); }
   }
-  function removeSite(origin){
-    localStorage.setItem(SITES_KEY, JSON.stringify(getSites().filter(function(s){ return s !== origin; })));
-  }
 
   // ── Bridge: push scripts into another site's localStorage ────────
   //
-  // The bridge tab is a page on the TARGET origin that has uFeatures injected.
-  // We open it, wait for it to signal ready (it posts uf_bridge_ready to opener),
-  // then send the payload. It saves and posts uf_bridge_ack back.
-  // window.name persists across redirects — if the tab redirects, uFeatures
-  // still recognises it as a bridge tab and takes over the page immediately.
+  // Opens a tab on the target origin. uFeatures is injected there too,
+  // so it handles uf_bridge_ping → uf_bridge_ready → uf_bridge_set → uf_bridge_ack.
   //
-  // We use "*" as postMessage target since we control both sides and need to
-  // send to the tab regardless of what URL it ended up on after redirects.
+  // FIX: We no longer check e.source === tab. Instead we use a unique session
+  // token so we can match responses even if the tab redirected and e.source changed.
+  // We also keep pinging until we get ack or timeout, and we accept uf_bridge_ready
+  // from any source that knows our token.
 
   function pushToSite(origin, scripts, onDone){
     var done = false;
-    var tab = null;
+    var tab  = null;
     var poll = null;
     var timeoutTimer = null;
+    var token = Math.random().toString(36).slice(2); // unique per push
 
     function finish(err){
       if(done) return;
@@ -75,39 +65,47 @@
       clearInterval(poll);
       clearTimeout(timeoutTimer);
       window.removeEventListener("message", onMsg);
-      if(!err){
-        // Close tab after a moment so user sees "Saved ✓"
-        setTimeout(function(){ try{ tab.close(); }catch(e){} }, 800);
+      if(err){
+        try{ tab && tab.close(); }catch(e){}
       } else {
-        try{ tab.close(); }catch(e){}
+        // small delay so the bridge tab can visually confirm before closing
+        setTimeout(function(){ try{ tab && tab.close(); }catch(e){} }, 600);
       }
       if(onDone) onDone(err||null);
     }
 
-    function onMsg(e){
-      var d = e.data; if(!d || typeof d !== "object") return;
-      // Must come from our tab
-      if(e.source !== tab) return;
+    var readySent = false;
 
-      if(d.type === "uf_bridge_ready"){
-        // Tab is ready — send the payload
+    function onMsg(e){
+      var d = e.data;
+      if(!d || typeof d !== "object") return;
+      // Match by token — works even if tab redirected and e.source changed
+      if(d.token !== token) return;
+
+      if(d.type === "uf_bridge_ready" && !readySent){
+        readySent = true;
         clearInterval(poll); poll = null;
+        // Send payload back to whatever source sent ready
         try{
-          tab.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts }, origin);
+          e.source.postMessage({
+            type: "uf_bridge_set",
+            key: SITE_KEY,
+            scripts: scripts,
+            token: token
+          }, "*");
         }catch(ex){ finish("send-failed"); }
       }
 
       if(d.type === "uf_bridge_ack"){
-        if(d.error){ finish("save-error: "+d.error); }
+        if(d.error){ finish("save-error: " + d.error); }
         else { finish(null); }
       }
     }
 
     window.addEventListener("message", onMsg);
 
-    // Open tab — no size args = opens as a real browser tab
     var winName = "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g,"_");
-    tab = window.open(origin + "/?__ufb=1", winName);
+    tab = window.open(origin + "/?__ufb=1&__uft=" + token, winName);
     if(!tab){
       window.removeEventListener("message", onMsg);
       if(onDone) onDone("blocked");
@@ -115,49 +113,45 @@
       return;
     }
 
-    // Poll until tab signals ready — handles case where tab takes a moment to load
-    // and the first few postMessages are missed. We send a ping every 200ms.
-    var pingAttempts = 0;
+    // Poll: keep sending pings with the token so bridge can echo it back
     poll = setInterval(function(){
       if(done){ clearInterval(poll); return; }
-      try{ tab.postMessage({ type:"uf_bridge_ping" }, "*"); }catch(e){}
-      pingAttempts++;
-    }, 200);
+      try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
+    }, 150);
 
-    // Hard timeout — 10 seconds
+    // Hard timeout — 12 seconds
     timeoutTimer = setTimeout(function(){
       if(!done) finish("timeout");
-    }, 10000);
+    }, 12000);
   }
 
-  // ── Bridge listener: every page with uFeatures receives bridge messages ──
-  // When this page is a bridge tab, it responds to pings and saves data.
+  // ── Bridge listener: every page with uFeatures handles bridge messages ──
+  // Echoes the token back so the opener can match even after redirects.
   window.addEventListener("message", function(e){
-    var d = e.data; if(!d || typeof d !== "object") return;
+    var d = e.data;
+    if(!d || typeof d !== "object") return;
 
-    // Respond to ping from opener — signals we are ready
     if(d.type === "uf_bridge_ping"){
-      try{ e.source.postMessage({ type:"uf_bridge_ready" }, e.origin); }catch(ex){}
+      // Echo ready with the token so opener can match us
+      try{ e.source.postMessage({ type:"uf_bridge_ready", token:d.token }, "*"); }catch(ex){}
     }
 
-    // Receive data to save
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
       try{
         localStorage.setItem(d.key, JSON.stringify(d.scripts));
-        e.source.postMessage({ type:"uf_bridge_ack" }, e.origin);
+        try{ e.source.postMessage({ type:"uf_bridge_ack", token:d.token }, "*"); }catch(ex2){}
         var st = document.getElementById("__uf_bridge_st");
         if(st){ st.textContent = "Saved \u2713"; st.style.color = "#1e7e34"; }
       }catch(ex){
-        try{ e.source.postMessage({ type:"uf_bridge_ack", error:String(ex) }, e.origin); }catch(e2){}}
+        try{ e.source.postMessage({ type:"uf_bridge_ack", token:d.token, error:String(ex) }, "*"); }catch(e2){}
+      }
     }
   });
 
   // ── Bridge page takeover ─────────────────────────────────────────
-  // Detects it's a bridge tab via ?__ufb=1 param OR window.name prefix.
-  // window.name persists across redirects so this works even if the site
-  // redirects away from the ?__ufb=1 URL.
-  // Uses document.open() + document.write() to strip ALL existing HTML
-  // synchronously — fires before any site scripts or redirects can run.
+  // Detects bridge tab via ?__ufb=1 OR window.name prefix.
+  // window.name persists across redirects — so even if the site redirects,
+  // this still fires and strips the page to just the saving UI.
   (function(){
     var isBridge = location.search.indexOf("__ufb=1") !== -1
                 || (window.name && window.name.indexOf("uf_bridge_") === 0);
@@ -168,7 +162,7 @@
         document.open("text/html", "replace");
         document.write(
           '<!DOCTYPE html><html><head>'
-          +'<meta charset="utf-8"><title>Saving data\u2026</title>'
+          +'<meta charset="utf-8"><title>Saving\u2026</title>'
           +'<style>'
           +'*{margin:0;padding:0;box-sizing:border-box}'
           +'html,body{height:100%;background:#f8f9fa;font-family:-apple-system,"Segoe UI",system-ui,sans-serif;font-size:13px;color:#5f6368;user-select:none;overflow:hidden}'
@@ -179,21 +173,17 @@
           +'</style>'
           +'</head><body>'
           +'<div class="spin"></div>'
-          +'<div id="__uf_bridge_st">Saving data\u2026</div>'
+          +'<div id="__uf_bridge_st">Saving\u2026</div>'
           +'</body></html>'
         );
         document.close();
       }catch(ex){}
     }
 
-    // Fire as early as possible — synchronously if doc is not yet loaded
     takeover();
 
-    // Also hook DOMContentLoaded in case document.write wasn't enough
-    // (some browsers ignore document.write after certain redirects)
     if(document.readyState === "loading"){
       document.addEventListener("DOMContentLoaded", function(){
-        // If the page somehow still has content, take over again
         if(!document.getElementById("__uf_bridge_st")) takeover();
       });
     }
@@ -213,7 +203,7 @@
 
   // ── Domain matching ──────────────────────────────────────────────
   function matchesDomain(pattern){
-    if(!pattern || !pattern.trim()) return false; // blank = never run (must specify domain)
+    if(!pattern || !pattern.trim()) return false;
     var host = location.hostname, path = location.pathname;
     return pattern.trim().split(",").some(function(p){
       p = p.trim(); if(!p) return false;
@@ -244,11 +234,18 @@
   }
 
   // ── Run stored scripts on this page ─────────────────────────────
+  // Reads from THIS site's localStorage. Scripts are pushed here by the bridge
+  // when saved from the settings page.
   function runSiteScripts(){
     if(IS_SETTINGS) return;
+    // Also skip bridge tabs
+    var isBridge = location.search.indexOf("__ufb=1") !== -1
+                || (window.name && window.name.indexOf("uf_bridge_") === 0);
+    if(isBridge) return;
+
     siteLoad().forEach(function(s){
       if(s.enabled && matchesDomain(s.domain)){
-        try{ Function(s.code)(); }
+        try{ new Function(s.code)(); }
         catch(e){ console.warn("[uFeatures]", s.name, e); }
       }
     });
@@ -258,7 +255,7 @@
   function runBookmarklet(text){
     var t = (text||"").trim();
     if(!/^javascript:/i.test(t)) return false;
-    try{ Function(t.replace(/^javascript:/i,""))(); }
+    try{ new Function(t.replace(/^javascript:/i,""))(); }
     catch(e){ alert("Bookmarklet error:\n"+e); }
     return true;
   }
@@ -277,7 +274,6 @@
     var w = f.parentNode;
     w.style.cssText += ";display:block!important;background:#282828!important;opacity:1!important;pointer-events:auto!important;";
     f.style.cssText += ";background:#282828!important;opacity:1!important;display:block!important;";
-    // Block inspect/devtools on the chii iframe itself
     f.addEventListener("contextmenu", function(e){ e.preventDefault(); e.stopPropagation(); }, true);
     f.addEventListener("keydown", function(e){
       if(e.key==="F12"||(e.ctrlKey&&e.shiftKey&&(e.key==="I"||e.key==="J"||e.key==="C"))||(e.ctrlKey&&e.key==="U"))
@@ -304,7 +300,7 @@
     chiiState=1;
     var ph=document.createElement("div"); ph.id="__uf_chii_ph";
     ph.style.cssText="position:fixed;bottom:0;left:0;width:100%;height:50%;background:#282828;z-index:2147483640;display:flex;align-items:center;justify-content:center;";
-    ph.innerHTML='<span style="color:#666;font-family:monospace;font-size:13px;">Loading Chii…</span>';
+    ph.innerHTML='<span style="color:#666;font-family:monospace;font-size:13px;">Loading Chii\u2026</span>';
     document.body.appendChild(ph);
     var s=document.createElement("script");
     HTMLElement.prototype.setAttribute.call(s,"embedded","true");
@@ -325,7 +321,6 @@
 
   function bootSettingsPage(){
     document.title = "uFeatures";
-    // Nuke existing page content, keep <html>
     while(document.documentElement.firstChild)
       document.documentElement.removeChild(document.documentElement.firstChild);
 
@@ -350,9 +345,7 @@
     return [
       "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
       "html,body{height:100%;background:#f9f9fb;color:#1c1b22;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}",
-      // Layout
       "#uf-wrap{display:flex;flex-direction:column;height:100vh;overflow:hidden}",
-      // Topbar
       "#uf-top{display:flex;align-items:stretch;background:#fff;border-bottom:1px solid #c8c8cc;height:40px;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,.06)}",
       ".uf-logo{display:flex;align-items:center;gap:8px;padding:0 16px;border-right:1px solid #c8c8cc;font-size:14px;font-weight:600;letter-spacing:-.2px;white-space:nowrap;color:#1c1b22}",
       ".uf-tabs{display:flex;align-items:stretch}",
@@ -360,24 +353,19 @@
       ".uf-tab:hover{color:#1c1b22;background:rgba(0,0,0,.03)}",
       ".uf-tab.on{color:#1c1b22;border-bottom-color:#7f0000}",
       ".uf-top-actions{margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 12px}",
-      // Body — normal scrollable for most tabs
       "#uf-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}",
       ".uf-scroll{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#c8c8cc transparent}",
       ".uf-sec{display:none}.uf-sec.on{display:flex;flex-direction:column;flex:1;min-height:0}",
-      // Status bar
       "#uf-bar{height:22px;background:#e0e0e4;display:flex;align-items:center;padding:0 12px;gap:20px;flex-shrink:0}",
       "#uf-bar span{font-size:11px;color:#6f6e77}","#uf-bar b{color:#1c1b22;font-weight:400}",
       "#uf-barst{margin-left:auto;font-size:11px;color:#6f6e77}",
-      // Buttons
       ".uf-btn{padding:5px 14px;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #c8c8cc;background:#fff;color:#1c1b22;transition:background .1s,border-color .1s}",
       ".uf-btn:hover{background:#f0f0f4;border-color:#adadb1}",
       ".uf-btn:disabled{opacity:.45;cursor:default;pointer-events:none}",
       ".uf-btn.prim{background:#7f0000;border-color:#7f0000;color:#fff}.uf-btn.prim:hover{background:#6a0000;border-color:#6a0000}",
       ".uf-btn.danger{color:#cc0000;border-color:#c8c8cc;background:#fff}.uf-btn.danger:hover{background:#fff0f0;border-color:#cc0000}",
       ".uf-btn.icon{padding:4px 8px;font-size:14px;line-height:1}",
-      // Section header
       ".uf-sh{font-size:11px;font-weight:600;color:#6f6e77;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #c8c8cc}",
-      // Card
       ".uf-card{background:#fff;border:1px solid #c8c8cc;border-radius:4px;overflow:hidden;margin-bottom:18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}",
       ".uf-fa{padding:14px 16px;display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #e0e0e4}",
       ".uf-g2{display:grid;grid-template-columns:1fr 1fr;gap:9px}",
@@ -388,7 +376,6 @@
       "textarea.uf-ta:focus{border-color:#7f0000;box-shadow:0 0 0 1px rgba(127,0,0,.2)}",
       ".uf-ff{display:flex;gap:8px;align-items:center}",
       "#uf-st{flex:1;font-size:11px}",
-      // Script list
       ".uf-srow{display:grid;grid-template-columns:18px 1fr auto auto;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid #e0e0e4}",
       ".uf-srow:last-child{border-bottom:none}",
       ".uf-srow:hover{background:#f9f9fb}",
@@ -397,33 +384,31 @@
       ".uf-sname.dim{color:#adadb1}",
       ".uf-sdomain{font-size:11px;color:#6f6e77}",
       ".uf-empty{padding:28px;text-align:center;color:#adadb1}",
-      // uBlock-style checkbox
       ".uf-cb{position:relative;width:16px;height:16px;flex-shrink:0;cursor:pointer}",
       ".uf-cb input{opacity:0;position:absolute;width:0;height:0}",
       ".uf-cb .box{position:absolute;inset:0;border:1px solid #adadb1;border-radius:2px;background:#fff;transition:background .12s,border-color .12s}",
       ".uf-cb input:checked+.box{background:#7f0000;border-color:#7f0000}",
       ".uf-cb input:checked+.box::after{content:'';position:absolute;left:4px;top:1px;width:5px;height:9px;border:2px solid #fff;border-top:none;border-left:none;transform:rotate(45deg)}",
-      // Keys tab
       ".uf-krow{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid #e0e0e4}",
       ".uf-krow:last-child{border-bottom:none}",
       ".uf-kbd{background:#f0f0f4;border:1px solid #c8c8cc;border-radius:3px;padding:3px 10px;font-family:monospace;font-size:12px;color:#1c1b22;min-width:170px;text-align:center}",
       ".uf-kdesc{font-size:12px;color:#6f6e77}",
       "code.uf-c{background:#f0f0f4;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px;color:#1c1b22}",
-      // Home tab
       ".uf-home-hero{display:flex;align-items:center;gap:16px;padding:24px 0 20px}",
       ".uf-home-hero h1{font-size:22px;font-weight:300;color:#1c1b22;letter-spacing:-.3px}",
       ".uf-home-hero h1 b{font-weight:700;color:#7f0000}",
       ".uf-home-credit{font-size:11px;color:#adadb1;margin-top:2px}",
       ".uf-feat-text p{font-size:13px;color:#3c3c43;line-height:1.7;margin-bottom:10px}",
       ".uf-feat-text p:last-child{margin-bottom:0}",
-      ".uf-feat-text p b{font-weight:600;color:#1c1b22}"
+      ".uf-feat-text p b{font-weight:600;color:#1c1b22}",
+      // Push status indicator on script rows
+      ".uf-push-st{font-size:10px;color:#adadb1;min-width:48px;text-align:right}"
     ].join("\n");
   }
 
   function settingsHTML(){
     var iconUrl = "https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
     return '<div id="uf-wrap">'
-      // Top bar
       +'<div id="uf-top">'
         +'<div class="uf-logo"><img src="'+iconUrl+'" width="20" height="20" style="object-fit:contain">uFeatures</div>'
         +'<div class="uf-tabs">'
@@ -438,7 +423,6 @@
 
       +'<div id="uf-body">'
 
-        // HOME TAB
         +'<div class="uf-sec on" id="uf-tab-home"><div class="uf-scroll">'
           +'<div class="uf-home-hero">'
             +'<img src="'+iconUrl+'" width="44" height="44" style="object-fit:contain;flex-shrink:0">'
@@ -450,14 +434,13 @@
           +'<div class="uf-sh">Features</div>'
           +'<div class="uf-feat-text">'
             +'<p><b>Script Manager</b> &mdash; Save JavaScript snippets that run automatically on specific sites every page load. Edit, toggle, or delete from My Scripts.</p>'
-            +'<p><b>Script Sync</b> &mdash; Scripts are stored on google.com and pushed to target sites via a bridge tab. Changes sync on save, toggle, and delete.</p>'
+            +'<p><b>Script Sync</b> &mdash; Scripts are stored on google.com and pushed to target sites via a quick bridge tab. Changes sync on save, toggle, and delete.</p>'
             +'<p><b>Securly Blocker</b> &mdash; Removes Securly overlay elements on load and watches via MutationObserver so they cannot come back.</p>'
-            +'<p><b>Chii Debugger</b> &mdash; Injects the Chii remote DevTools panel into any page with a dark background so you know it activated. Ctrl+Shift+I to toggle.</p>'
+            +'<p><b>Chii Debugger</b> &mdash; Injects the Chii remote DevTools panel into any page. Ctrl+Shift+I to toggle.</p>'
             +'<p><b>Bookmarklet Runner</b> &mdash; Copy any javascript: URL then press Ctrl+V outside a text field to run it on the current page.</p>'
           +'</div>'
         +'</div></div>'
 
-        // SCRIPTS TAB
         +'<div class="uf-sec" id="uf-tab-scripts"><div class="uf-scroll">'
           +'<div class="uf-sh">Add / Edit Script</div>'
           +'<div class="uf-card"><div class="uf-fa">'
@@ -476,7 +459,6 @@
           +'<div class="uf-card" id="uf-slist"></div>'
         +'</div></div>'
 
-        // KEYS TAB
         +'<div class="uf-sec" id="uf-tab-keys"><div class="uf-scroll">'
           +'<div class="uf-sh">Keyboard Shortcuts</div>'
           +'<div class="uf-card">'
@@ -488,7 +470,6 @@
 
       +'</div>'
 
-      // Status bar
       +'<div id="uf-bar">'
         +'<span>uFeatures &mdash; storage: <b>google.com</b></span>'
         +'<span id="uf-cnt-s">0 scripts</span>'
@@ -540,14 +521,21 @@
       // Info
       var info=document.createElement("div"); info.className="uf-sinfo";
       var nm=document.createElement("div"); nm.className="uf-sname"+(s.enabled?"":" dim"); nm.textContent=s.name;
-      var dm=document.createElement("div"); dm.className="uf-sdomain"; dm.textContent=s.domain||"all sites";
+      var dm=document.createElement("div"); dm.className="uf-sdomain"; dm.textContent=s.domain||"(no domain set)";
       info.appendChild(nm); info.appendChild(dm);
 
-      cb.onchange=(function(idx,nmEl){ return function(){
+      // Push status label per row
+      var pst=document.createElement("span"); pst.className="uf-push-st";
+
+      cb.onchange=(function(idx,nmEl,pstEl){ return function(){
         var a=siteLoad(); a[idx].enabled=this.checked; siteSave(a);
         nmEl.className="uf-sname"+(this.checked?"":" dim"); updateBar();
-        pushForDomain(a[idx].domain, a);
-      }; })(i,nm);
+        pstEl.textContent="pushing\u2026"; pstEl.style.color="#adadb1";
+        pushForDomain(a[idx].domain, a, function(ok){
+          pstEl.textContent=ok?"synced \u2713":"push failed";
+          pstEl.style.color=ok?"#1e7e34":"#cc0000";
+        });
+      }; })(i,nm,pst);
 
       // Edit
       var eb=document.createElement("button"); eb.className="uf-btn"; eb.textContent="Edit";
@@ -556,11 +544,9 @@
         document.getElementById("uf-nameF").value=sc.name;
         document.getElementById("uf-domF").value=sc.domain||"";
         document.getElementById("uf-codeF").value=sc.code;
-        // Show editing state
         document.getElementById("uf-saveBtn").textContent="Update script";
         document.getElementById("uf-saveBtn").className="uf-btn prim";
         document.getElementById("uf-cancelEdit").style.display="";
-        // Switch to scripts tab and scroll to top
         document.querySelectorAll(".uf-tab").forEach(function(t){ t.classList.remove("on"); });
         document.querySelectorAll(".uf-sec").forEach(function(s){ s.classList.remove("on"); });
         document.querySelector("[data-tab='scripts']").classList.add("on");
@@ -578,13 +564,12 @@
         pushForDomain(domain, a);
       }; })(i,s.name,s.domain);
 
-      row.appendChild(lbl); row.appendChild(info); row.appendChild(eb); row.appendChild(db);
+      row.appendChild(lbl); row.appendChild(info); row.appendChild(pst); row.appendChild(eb); row.appendChild(db);
       c.appendChild(row);
     });
   }
 
   function wireSettings(){
-    // Auto-fill domain from referrer (the site that opened settings)
     var domF = document.getElementById("uf-domF");
     if(_referrer) domF.value = _referrer;
 
@@ -608,6 +593,7 @@
       document.getElementById("uf-saveBtn").textContent = "Save script";
       document.getElementById("uf-saveBtn").className = "uf-btn prim";
       document.getElementById("uf-cancelEdit").style.display = "none";
+      setSt("","");
     });
 
     // Save script
@@ -619,59 +605,79 @@
 
       var arr=siteLoad();
       var idx=-1;
-      // Only replace an existing script if we're explicitly editing one
       if(_editingName) arr.forEach(function(s,i){ if(s.name===_editingName) idx=i; });
       var entry={name:name,domain:domain,code:code,enabled:true};
       if(idx>=0) arr[idx]=entry; else arr.push(entry);
       siteSave(arr);
 
-      // Reset editing state
       _editingName=null;
       document.getElementById("uf-saveBtn").textContent="Save script";
       document.getElementById("uf-saveBtn").className="uf-btn prim";
       document.getElementById("uf-cancelEdit").style.display="none";
 
       renderScripts(); updateBar();
-      pushForDomain(domain, arr);
 
       document.getElementById("uf-nameF").value="Example Script";
       document.getElementById("uf-codeF").value="";
+      if(_referrer) document.getElementById("uf-domF").value=_referrer;
+      else document.getElementById("uf-domF").value="";
+
+      pushForDomain(domain, arr);
     });
 
     // Update all sites button
     document.getElementById("uf-update").addEventListener("click", function(){
       var sites=getSites(), scripts=siteLoad();
       if(!sites.length){ setSt("No tracked sites.","#6f6e77"); return; }
-      var rem=sites.length;
+      var rem=sites.length, failed=0;
       setSt("Updating "+rem+" site(s)\u2026","#6f6e77");
       sites.forEach(function(origin){
         var toSend=scripts.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
-        pushToSite(origin,toSend,function(){ rem--; if(rem<=0) setSt("All sites updated \u2713","green"); });
+        pushToSite(origin,toSend,function(err){
+          rem--;
+          if(err) failed++;
+          if(rem<=0){
+            if(failed===0) setSt("All sites updated \u2713","#1e7e34");
+            else setSt(failed+" site(s) failed to update","#cc0000");
+          }
+        });
       });
     });
 
     renderScripts(); updateBar();
   }
 
-  // Helper: derive origin from domain string and push
-  function pushForDomain(domain, arr){
-    if(!domain){ setSt("Saved (no domain — not pushed to any site)","#6f6e77"); return; }
+  // ── pushForDomain: derive origin and push, with optional callback ─
+  function pushForDomain(domain, arr, cb){
+    if(!domain){
+      setSt("Saved (no domain \u2014 not pushed to any site)","#6f6e77");
+      if(cb) cb(false);
+      return;
+    }
     var rawDomain=domain.split(",")[0].trim().replace(/^\*\./,"");
     var slash=rawDomain.indexOf("/"); if(slash!==-1) rawDomain=rawDomain.slice(0,slash);
-    if(!rawDomain){ setSt("Saved","#6f6e77"); return; }
+    if(!rawDomain){
+      setSt("Saved","#6f6e77");
+      if(cb) cb(false);
+      return;
+    }
+
+    // Try known tracked origins first, fall back to https://
     var known=getSites().filter(function(o){ return o.indexOf(rawDomain)!==-1; });
     var origins=known.length ? known : ["https://"+rawDomain];
+
     var rem=origins.length, failed=0;
     setSt("Pushing to "+rawDomain+"\u2026","#6f6e77");
+
     origins.forEach(function(origin){
-      addSite(origin); updateBar();
       var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
       pushToSite(origin, toSend, function(err){
         rem--;
-        if(err) failed++;
+        if(err){ failed++; }
+        else { addSite(origin); updateBar(); } // only track on success
         if(rem<=0){
-          if(failed===0) setSt("Saved \u2713","#1e7e34");
-          else setSt("Saved locally but push to "+rawDomain+" failed ("+failed+" error"+(failed>1?"s":"")+")","#cc0000");
+          if(failed===0){ setSt("Saved \u2713","#1e7e34"); if(cb) cb(true); }
+          else { setSt("Saved locally but push to "+rawDomain+" failed","#cc0000"); if(cb) cb(false); }
         }
       });
     });
