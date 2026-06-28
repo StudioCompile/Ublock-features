@@ -53,13 +53,13 @@
   // Token: a random token per push is included in every message so we can match
   // responses even if the tab redirected and e.source changed.
 
-  var _bridgeTabs = {}; // origin → { tab, queue }
-
   function pushToSite(origin, scripts, onDone){
     var done  = false;
     var poll  = null;
     var timer = null;
     var token = Math.random().toString(36).slice(2);
+    // Fixed name per origin — window.open reuses an existing tab with this name
+    // automatically. No need to track it ourselves.
     var winName = "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g,"_");
 
     function finish(err){
@@ -68,22 +68,8 @@
       clearInterval(poll);
       clearTimeout(timer);
       window.removeEventListener("message", onMsg);
-      if(!err){
-        // Give the bridge tab a moment to show "Saved ✓" then close
-        setTimeout(function(){
-          var entry = _bridgeTabs[origin];
-          if(entry && entry.tab && !entry.tab.closed){
-            try{ entry.tab.close(); }catch(e){}
-          }
-          delete _bridgeTabs[origin];
-        }, 700);
-      } else {
-        var entry = _bridgeTabs[origin];
-        if(entry && entry.tab && !entry.tab.closed){
-          try{ entry.tab.close(); }catch(e){}
-        }
-        delete _bridgeTabs[origin];
-      }
+      // Close immediately — no animation delay
+      try{ tab && tab.close(); }catch(e){}
       if(onDone) onDone(err||null);
     }
 
@@ -103,22 +89,15 @@
 
     window.addEventListener("message", onMsg);
 
-    // Check if we already have a live tab for this origin
-    var existing = _bridgeTabs[origin];
-    var tab;
-    if(existing && existing.tab && !existing.tab.closed){
-      tab = existing.tab;
-      // Tab already open — just ping it with the new token
-      try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
-    } else {
-      tab = window.open(origin + "/?__ufb=1", winName);
-      if(!tab){
-        window.removeEventListener("message", onMsg);
-        if(onDone) onDone("blocked");
-        setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
-        return;
-      }
-      _bridgeTabs[origin] = { tab:tab };
+    // window.open with a named window reuses the existing tab if it's still open,
+    // or opens a new one if it's closed. This is the browser's native behaviour —
+    // no manual tracking needed.
+    var tab = window.open(origin + "/?__ufb=1", winName);
+    if(!tab){
+      window.removeEventListener("message", onMsg);
+      if(onDone) onDone("blocked");
+      setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
+      return;
     }
 
     // Poll ping until bridge responds ready
@@ -155,9 +134,11 @@
   });
 
   // ── Bridge page overlay ───────────────────────────────────────────
-  // When this tab is a bridge tab, overlay a "Saving…" UI on top of the page
-  // WITHOUT using document.write (which would kill the message listeners).
-  // We inject a full-screen fixed overlay instead.
+  // When this tab is a bridge tab, show a full-page "Saving…" screen.
+  // We can't use document.write (kills message listeners), so instead we:
+  //   1. Inject a <style> that forces html/body to be blank white and hides all content
+  //   2. Append a fixed full-screen overlay div that looks identical to the old version
+  // The message listeners on `window` survive because we never touch the document itself.
   (function(){
     var isBridge = location.search.indexOf("__ufb=1") !== -1
                 || (window.name && window.name.indexOf("uf_bridge_") === 0);
@@ -165,34 +146,38 @@
 
     function showOverlay(){
       if(document.getElementById("__uf_bridge_overlay")) return;
+
+      // Kill all page content visually
+      var killStyle = document.createElement("style");
+      killStyle.textContent = [
+        "html,body{background:#f8f9fa!important;overflow:hidden!important;margin:0!important;padding:0!important}",
+        "body>*:not(#__uf_bridge_overlay){display:none!important}",
+        "#__uf_bridge_overlay .uf-bspin{width:20px;height:20px;border:2px solid #e0e0e0;border-top-color:#5f6368;border-radius:50%;animation:ufbs 0.8s linear infinite}",
+        "@keyframes ufbs{to{transform:rotate(360deg)}}"
+      ].join("");
+      (document.head || document.documentElement).appendChild(killStyle);
+
       var ov = document.createElement("div");
       ov.id = "__uf_bridge_overlay";
-      ov.style.cssText = [
-        "position:fixed","top:0","left:0","width:100%","height:100%",
-        "background:#f8f9fa","z-index:2147483647",
-        "display:flex","align-items:center","justify-content:center",
-        "flex-direction:column","gap:10px",
-        "font-family:-apple-system,'Segoe UI',system-ui,sans-serif",
-        "font-size:13px","color:#5f6368","user-select:none"
-      ].join(";");
+      ov.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:#f8f9fa;z-index:2147483647;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;font-size:13px;color:#5f6368;user-select:none";
 
-      var style = document.createElement("style");
-      style.textContent = ".uf-spin{width:20px;height:20px;border:2px solid #e0e0e0;border-top-color:#5f6368;border-radius:50%;animation:ufspin 0.8s linear infinite}@keyframes ufspin{to{transform:rotate(360deg)}}";
-      ov.appendChild(style);
-
-      var spin = document.createElement("div"); spin.className = "uf-spin";
+      var spin = document.createElement("div"); spin.className = "uf-bspin";
       var lbl  = document.createElement("div"); lbl.id = "__uf_bridge_st"; lbl.textContent = "Saving\u2026";
       ov.appendChild(spin); ov.appendChild(lbl);
 
-      // Inject as early as possible
       if(document.body) document.body.appendChild(ov);
-      else document.addEventListener("DOMContentLoaded", function(){ document.body.appendChild(ov); });
+      else document.documentElement.appendChild(ov);
     }
 
-    showOverlay();
-    // Also guard against DOMContentLoaded firing before body exists
+    // Fire as early as possible — before page content renders
     if(document.readyState === "loading"){
+      // Inject kill-style immediately into <head> even before body exists
+      var earlyStyle = document.createElement("style");
+      earlyStyle.textContent = "html,body{background:#f8f9fa!important;overflow:hidden!important}body>*{display:none!important}";
+      (document.head || document.documentElement).appendChild(earlyStyle);
       document.addEventListener("DOMContentLoaded", showOverlay);
+    } else {
+      showOverlay();
     }
   })();
 
