@@ -53,13 +53,16 @@
   // Token: a random token per push is included in every message so we can match
   // responses even if the tab redirected and e.source changed.
 
+  // Track open bridge tabs by winName.
+  // If we call window.open on an already-open named tab, the browser navigates it
+  // (full reload, listeners die, adds load time). Instead we post directly if open.
+  var _openBridgeTabs = {};
+
   function pushToSite(origin, scripts, onDone){
     var done  = false;
     var poll  = null;
     var timer = null;
     var token = Math.random().toString(36).slice(2);
-    // Fixed name per origin — window.open reuses an existing tab with this name
-    // automatically. No need to track it ourselves.
     var winName = "uf_bridge_" + origin.replace(/[^a-zA-Z0-9]/g,"_");
 
     function finish(err){
@@ -68,8 +71,8 @@
       clearInterval(poll);
       clearTimeout(timer);
       window.removeEventListener("message", onMsg);
-      // Close immediately — no animation delay
       try{ tab && tab.close(); }catch(e){}
+      delete _openBridgeTabs[winName];
       if(onDone) onDone(err||null);
     }
 
@@ -89,24 +92,29 @@
 
     window.addEventListener("message", onMsg);
 
-    // window.open with a named window reuses the existing tab if it's still open,
-    // or opens a new one if it's closed. This is the browser's native behaviour —
-    // no manual tracking needed.
-    var tab = window.open(origin + "/?__ufb=1", winName);
-    if(!tab){
-      window.removeEventListener("message", onMsg);
-      if(onDone) onDone("blocked");
-      setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
-      return;
+    var tab;
+    var existing = _openBridgeTabs[winName];
+    if(existing && !existing.closed){
+      // Reuse the open tab — post directly without navigating it
+      tab = existing;
+      try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
+    } else {
+      tab = window.open(origin + "/?__ufb=1", winName);
+      if(!tab){
+        window.removeEventListener("message", onMsg);
+        if(onDone) onDone("blocked");
+        setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
+        return;
+      }
+      _openBridgeTabs[winName] = tab;
     }
 
-    // Poll ping until bridge responds ready
     poll = setInterval(function(){
       if(done){ clearInterval(poll); return; }
       try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
-    }, 150);
+    }, 100);
 
-    timer = setTimeout(function(){ if(!done) finish("timeout"); }, 12000);
+    timer = setTimeout(function(){ if(!done) finish("timeout"); }, 10000);
   }
 
   // ── Bridge message listener (runs on EVERY page) ──────────────────
@@ -547,19 +555,16 @@
         document.getElementById("uf-nameF").focus();
       }; })(s);
 
-      // Delete — UI update happens AFTER push confirms
+      // Delete — remove from list immediately (optimistic), push in background
       var db=document.createElement("button"); db.className="uf-btn danger"; db.textContent="Delete";
-      db.onclick=(function(idx,name,domain,rowEl){ return function(){
+      db.onclick=(function(idx,name,domain){ return function(){
         if(!confirm("Delete \""+name+"\"?")) return;
-        db.disabled=true; eb.disabled=true;
-        pst.textContent="deleting\u2026"; pst.style.color="#adadb1";
         var a=siteLoad(); a.splice(idx,1); siteSave(a);
+        renderScripts(); updateBar(); // instant UI update
         pushForDomain(domain, a, function(ok){
-          // Only update UI after the push is done (or failed)
-          renderScripts(); updateBar();
           if(!ok) setSt("Deleted locally but push to remote failed","#cc0000");
         });
-      }; })(i,s.name,s.domain,row);
+      }; })(i,s.name,s.domain);
 
       row.appendChild(lbl); row.appendChild(info); row.appendChild(pst); row.appendChild(eb); row.appendChild(db);
       c.appendChild(row);
@@ -638,6 +643,10 @@
   }
 
   // ── pushForDomain ─────────────────────────────────────────────────
+  // Strips www. from both sides when matching known origins so that
+  // example.com and www.example.com are always treated as the same site.
+  function stripWww(host){ return host.replace(/^www\./,""); }
+
   function pushForDomain(domain, arr, cb){
     if(!domain){
       setSt("Saved (no domain \u2014 not pushed to any site)","#6f6e77");
@@ -645,21 +654,28 @@
     }
     var raw=domain.split(",")[0].trim().replace(/^\*\./,"");
     var sl=raw.indexOf("/"); if(sl!==-1) raw=raw.slice(0,sl);
+    raw=stripWww(raw);
     if(!raw){ setSt("Saved","#6f6e77"); if(cb) cb(false); return; }
 
-    var known=getSites().filter(function(o){ return o.indexOf(raw)!==-1; });
-    var origins=known.length ? known : ["https://"+raw];
-    var rem=origins.length, failed=0;
+    // Match stored origins by comparing stripped hostnames
+    var known=getSites().filter(function(o){
+      try{ return stripWww(new URL(o).hostname).indexOf(raw)!==-1; }catch(e){ return false; }
+    });
+
+    // If no tracked origin yet, try both www and non-www so we find the right one
+    var origins=known.length ? known : ["https://"+raw, "https://www."+raw];
+
+    var rem=origins.length, failed=0, anyOk=false;
     setSt("Pushing to "+raw+"\u2026","#6f6e77");
 
     origins.forEach(function(origin){
       var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
       pushToSite(origin, toSend, function(err){
         rem--;
-        if(err) failed++;
-        else{ addSite(origin); updateBar(); }
+        if(err){ failed++; }
+        else{ anyOk=true; addSite(origin); updateBar(); }
         if(rem<=0){
-          if(failed===0){ setSt("Saved \u2713","#1e7e34"); if(cb) cb(true); }
+          if(anyOk){ setSt("Saved \u2713","#1e7e34"); if(cb) cb(true); }
           else{ setSt("Saved locally, push to "+raw+" failed","#cc0000"); if(cb) cb(false); }
         }
       });
