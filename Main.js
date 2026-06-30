@@ -1,16 +1,3 @@
-/// uFeatures.js
-// Inject on every site via a userscript manager (Violentmonkey / Tampermonkey).
-//
-// HOW IT WORKS:
-//   1. Visit google.com/ufeatures  →  page is taken over, shows the full settings UI.
-//   2. Scripts are saved in google.com localStorage (the master list).
-//   3. When you save/edit/delete/toggle a script, it pushes to the target site's
-//      localStorage via a bridge tab (open → save → close, or reuse if already open).
-//   4. On every other page load, uFeatures reads THAT site's localStorage and runs
-//      matching scripts. No persistent tab needed at runtime.
-//   5. Ctrl+`  →  opens google.com/ufeatures settings in a new tab.
-//   6. Ctrl+Shift+I  →  Chii remote debugger.
-
 !function(){
 
   var SITE_KEY  = "__uFeaturesScripts";
@@ -37,26 +24,12 @@
   }
   function addSite(origin){
     var list = getSites();
-    if(list.indexOf(origin) === -1){ list.push(origin); localStorage.setItem(SITES_KEY, JSON.stringify(list)); }
+    if(list.indexOf(origin)===-1){ list.push(origin); localStorage.setItem(SITES_KEY, JSON.stringify(list)); }
   }
 
   // ── Bridge ────────────────────────────────────────────────────────
-  //
-  // Key insight: document.write() wipes the window including all event listeners.
-  // So the bridge tab CANNOT use document.write for its UI — it must manipulate
-  // the existing DOM in-place so the message listeners injected by the userscript
-  // stay alive and can receive uf_bridge_set.
-  //
-  // Reuse: window.open with a fixed winName reuses an existing tab with that name.
-  // We keep a map of open bridge tabs so we can post directly without reopening.
-  //
-  // Token: a random token per push is included in every message so we can match
-  // responses even if the tab redirected and e.source changed.
-
-  // Track open bridge tabs by winName.
-  // If we call window.open on an already-open named tab, the browser navigates it
-  // (full reload, listeners die, adds load time). Instead we post directly if open.
-  var _openBridgeTabs = {};
+  // Opens a tab on the target origin. Polls by sending uf_bridge_set every
+  // 150ms until the tab acks. No handshake — just send and wait for ack.
 
   function pushToSite(origin, scripts, onDone){
     var done  = false;
@@ -71,20 +44,13 @@
       clearInterval(poll);
       clearTimeout(timer);
       window.removeEventListener("message", onMsg);
-      try{ tab && tab.close(); }catch(e){}
-      delete _openBridgeTabs[winName];
+      setTimeout(function(){ try{ tab && tab.close(); }catch(e){} }, 500);
       if(onDone) onDone(err||null);
     }
 
     function onMsg(e){
       var d = e.data;
       if(!d || typeof d !== "object" || d.token !== token) return;
-      if(d.type === "uf_bridge_ready"){
-        clearInterval(poll); poll = null;
-        try{
-          e.source.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts, token:token }, "*");
-        }catch(ex){ finish("send-failed"); }
-      }
       if(d.type === "uf_bridge_ack"){
         finish(d.error ? "save-error:"+d.error : null);
       }
@@ -92,47 +58,33 @@
 
     window.addEventListener("message", onMsg);
 
-    var tab;
-    var existing = _openBridgeTabs[winName];
-    if(existing && !existing.closed){
-      // Reuse the open tab — post directly without navigating it
-      tab = existing;
-      try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
-    } else {
-      tab = window.open(origin + "/?__ufb=1", winName);
-      if(!tab){
-        window.removeEventListener("message", onMsg);
-        if(onDone) onDone("blocked");
-        setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
-        return;
-      }
-      _openBridgeTabs[winName] = tab;
+    var tab = window.open(origin + "/?__ufb=1", winName);
+    if(!tab){
+      window.removeEventListener("message", onMsg);
+      if(onDone) onDone("blocked");
+      setSt("Popup blocked \u2014 allow popups from google.com","#cc0000");
+      return;
     }
 
+    // Keep sending the payload until the tab acks (it may still be loading)
     poll = setInterval(function(){
       if(done){ clearInterval(poll); return; }
-      try{ tab.postMessage({ type:"uf_bridge_ping", token:token }, "*"); }catch(e){}
-    }, 100);
+      try{ tab.postMessage({ type:"uf_bridge_set", key:SITE_KEY, scripts:scripts, token:token }, "*"); }catch(e){}
+    }, 150);
 
     timer = setTimeout(function(){ if(!done) finish("timeout"); }, 10000);
   }
 
   // ── Bridge message listener (runs on EVERY page) ──────────────────
-  // CRITICAL: We only manipulate the existing DOM here — never document.write —
-  // so this listener stays alive throughout the bridge tab's lifetime.
+  // Never use document.write here — it kills these listeners.
   window.addEventListener("message", function(e){
     var d = e.data;
     if(!d || typeof d !== "object") return;
-
-    if(d.type === "uf_bridge_ping"){
-      try{ e.source.postMessage({ type:"uf_bridge_ready", token:d.token }, "*"); }catch(ex){}
-    }
 
     if(d.type === "uf_bridge_set" && d.key && Array.isArray(d.scripts)){
       try{
         localStorage.setItem(d.key, JSON.stringify(d.scripts));
         try{ e.source.postMessage({ type:"uf_bridge_ack", token:d.token }, "*"); }catch(ex2){}
-        // Update the bridge overlay text if it's showing
         var st = document.getElementById("__uf_bridge_st");
         if(st){ st.textContent = "Saved \u2713"; st.style.color = "#1e7e34"; }
       }catch(ex){
@@ -142,11 +94,8 @@
   });
 
   // ── Bridge page overlay ───────────────────────────────────────────
-  // When this tab is a bridge tab, show a full-page "Saving…" screen.
-  // We can't use document.write (kills message listeners), so instead we:
-  //   1. Inject a <style> that forces html/body to be blank white and hides all content
-  //   2. Append a fixed full-screen overlay div that looks identical to the old version
-  // The message listeners on `window` survive because we never touch the document itself.
+  // Show a plain white "Saving…" screen on the bridge tab.
+  // Use a fixed overlay div — NOT document.write — so the message listeners survive.
   (function(){
     var isBridge = location.search.indexOf("__ufb=1") !== -1
                 || (window.name && window.name.indexOf("uf_bridge_") === 0);
@@ -154,35 +103,27 @@
 
     function showOverlay(){
       if(document.getElementById("__uf_bridge_overlay")) return;
-
-      // Kill all page content visually
-      var killStyle = document.createElement("style");
-      killStyle.textContent = [
-        "html,body{background:#f8f9fa!important;overflow:hidden!important;margin:0!important;padding:0!important}",
-        "body>*:not(#__uf_bridge_overlay){display:none!important}",
-        "#__uf_bridge_overlay .uf-bspin{width:20px;height:20px;border:2px solid #e0e0e0;border-top-color:#5f6368;border-radius:50%;animation:ufbs 0.8s linear infinite}",
-        "@keyframes ufbs{to{transform:rotate(360deg)}}"
-      ].join("");
-      (document.head || document.documentElement).appendChild(killStyle);
+      var s = document.createElement("style");
+      s.textContent = "html,body{background:#fff!important;overflow:hidden!important;margin:0!important;padding:0!important}body>*:not(#__uf_bridge_overlay){display:none!important}";
+      (document.head||document.documentElement).appendChild(s);
 
       var ov = document.createElement("div");
       ov.id = "__uf_bridge_overlay";
-      ov.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:#f8f9fa;z-index:2147483647;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;font-size:13px;color:#5f6368;user-select:none";
+      ov.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:#fff;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;font-size:13px;color:#555;z-index:2147483647";
 
-      var spin = document.createElement("div"); spin.className = "uf-bspin";
-      var lbl  = document.createElement("div"); lbl.id = "__uf_bridge_st"; lbl.textContent = "Saving\u2026";
-      ov.appendChild(spin); ov.appendChild(lbl);
+      var lbl = document.createElement("div");
+      lbl.id = "__uf_bridge_st";
+      lbl.textContent = "Saving\u2026";
 
+      ov.appendChild(lbl);
       if(document.body) document.body.appendChild(ov);
       else document.documentElement.appendChild(ov);
     }
 
-    // Fire as early as possible — before page content renders
     if(document.readyState === "loading"){
-      // Inject kill-style immediately into <head> even before body exists
-      var earlyStyle = document.createElement("style");
-      earlyStyle.textContent = "html,body{background:#f8f9fa!important;overflow:hidden!important}body>*{display:none!important}";
-      (document.head || document.documentElement).appendChild(earlyStyle);
+      var es = document.createElement("style");
+      es.textContent = "html,body{background:#fff!important;overflow:hidden!important}body>*{display:none!important}";
+      (document.head||document.documentElement).appendChild(es);
       document.addEventListener("DOMContentLoaded", showOverlay);
     } else {
       showOverlay();
@@ -195,20 +136,22 @@
     if(el) el.remove();
     ["securly-overlay","securly_overlay","securly-extension"].forEach(function(c){
       var nl = document.getElementsByClassName(c);
-      for(var i = nl.length-1; i >= 0; i--) nl[i].remove();
+      for(var i=nl.length-1;i>=0;i--) nl[i].remove();
     });
   }
-  new MutationObserver(killSecurly).observe(document.documentElement, {childList:true,subtree:true});
+  new MutationObserver(killSecurly).observe(document.documentElement,{childList:true,subtree:true});
   killSecurly();
 
   // ── Domain matching ───────────────────────────────────────────────
+  function stripWww(h){ return h.replace(/^www\./,""); }
+
   function matchesDomain(pattern){
     if(!pattern||!pattern.trim()) return false;
-    var host = location.hostname, path = location.pathname;
+    var host = stripWww(location.hostname), path = location.pathname;
     return pattern.trim().split(",").some(function(p){
       p = p.trim(); if(!p) return false;
       var si = p.indexOf("/");
-      var hp = si===-1 ? p : p.slice(0,si);
+      var hp = stripWww(si===-1 ? p : p.slice(0,si));
       var pp = si===-1 ? "" : p.slice(si);
       var hm = hp.slice(0,2)==="*."
         ? host===hp.slice(2)||host.endsWith("."+hp.slice(2))
@@ -218,13 +161,15 @@
       return path===pp||path.startsWith(norm);
     });
   }
+
   function domainMatchesOrigin(pattern, origin){
     if(!pattern||!pattern.trim()) return false;
     try{
-      var host = new URL(origin).hostname;
+      var host = stripWww(new URL(origin).hostname);
       return pattern.trim().split(",").some(function(p){
         p = p.trim(); if(!p) return false;
-        var si = p.indexOf("/"); var hp = si===-1 ? p : p.slice(0,si);
+        var si = p.indexOf("/");
+        var hp = stripWww(si===-1 ? p : p.slice(0,si));
         return hp.slice(0,2)==="*."
           ? host===hp.slice(2)||host.endsWith("."+hp.slice(2))
           : host===hp;
@@ -246,9 +191,143 @@
     });
   }
 
+  // ── Iframe corner menu ────────────────────────────────────────────
+  (function(){
+    if(window === window.top) return;
+    if(IS_SETTINGS) return;
+    var isBridge = location.search.indexOf("__ufb=1")!==-1
+                || (window.name && window.name.indexOf("uf_bridge_")===0);
+    if(isBridge) return;
+
+    // 8x8 invisible hot zone fixed to bottom-right corner
+    var zone = document.createElement("div");
+    zone.style.cssText = "position:fixed;bottom:0;right:0;width:8px;height:8px;z-index:2147483644";
+
+    // Buffer so mouse can travel from corner to popup without it closing
+    var buffer = document.createElement("div");
+    buffer.style.cssText = "position:fixed;bottom:0;right:0;width:320px;height:60px;z-index:2147483645;pointer-events:none";
+
+    // Single-line popup — input + go button side by side
+    var popup = document.createElement("div");
+    popup.style.cssText = [
+      "position:fixed;bottom:10px;right:10px;z-index:2147483646",
+      "display:flex;align-items:center;gap:4px",
+      "background:#fff;border:1px solid #ddd",
+      "padding:4px 5px",
+      "border-radius:6px",
+      "box-shadow:0 2px 8px rgba(0,0,0,.12)",
+      "opacity:0;pointer-events:none",
+      "transition:opacity .15s ease"
+    ].join(";");
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.style.cssText = [
+      "border:1px solid #ccc;padding:3px 6px",
+      "font-family:Arial,sans-serif;font-size:12px",
+      "color:#111;background:#fff;outline:none",
+      "width:220px;height:22px;box-sizing:border-box;border-radius:4px",
+      "transition:border-color .1s"
+    ].join(";");
+    input.onfocus = function(){ this.style.borderColor="#888"; };
+    input.onblur  = function(){ this.style.borderColor="#ccc"; };
+
+    var btnGo = document.createElement("button");
+    btnGo.textContent = "\u2192";
+    btnGo.style.cssText = [
+      "width:22px;height:22px;padding:0;line-height:22px;text-align:center",
+      "font-size:13px;font-family:Arial,sans-serif",
+      "cursor:pointer;border:1px solid #ccc",
+      "border-radius:4px",
+      "background:#f0f0f0;color:#666;outline:none;flex-shrink:0",
+      "transition:background .1s"
+    ].join(";");
+    btnGo.onmouseover = function(){ this.style.background="#e0e0e0"; };
+    btnGo.onmouseout  = function(){ this.style.background="#f0f0f0"; };
+    btnGo.onclick = function(e){
+      e.stopPropagation();
+      var url = input.value.trim();
+      if(url) try{ window.parent.postMessage({ type:"uf_iframe_nav", url:url }, "*"); }catch(ex){}
+    };
+    input.onkeydown = function(e){ if(e.key==="Enter") btnGo.click(); };
+
+    var icon_url = "https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
+    var logo = document.createElement("img");
+    logo.src = icon_url;
+    logo.style.cssText = "width:13px;height:13px;object-fit:contain;opacity:.35;flex-shrink:0";
+
+    popup.appendChild(logo);
+    popup.appendChild(input);
+    popup.appendChild(btnGo);
+
+    var hideTimer = null;
+    var visible = false;
+
+    function show(){
+      clearTimeout(hideTimer);
+      if(visible) return;
+      visible = true;
+      input.value = location.href;
+      popup.style.pointerEvents = "auto";
+      buffer.style.pointerEvents = "auto";
+      popup.style.opacity = "1";
+    }
+    function scheduleHide(){
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(function(){
+        visible = false;
+        popup.style.opacity = "0";
+        popup.style.pointerEvents = "none";
+        buffer.style.pointerEvents = "none";
+      }, 250);
+    }
+
+    zone.addEventListener("mouseenter", show);
+    zone.addEventListener("mouseleave", scheduleHide);
+    buffer.addEventListener("mouseenter", function(){ clearTimeout(hideTimer); });
+    buffer.addEventListener("mouseleave", scheduleHide);
+    popup.addEventListener("mouseenter", function(){ clearTimeout(hideTimer); });
+    popup.addEventListener("mouseleave", scheduleHide);
+
+    function attach(){
+      if(!document.body) return;
+      document.body.appendChild(zone);
+      document.body.appendChild(buffer);
+      document.body.appendChild(popup);
+    }
+    if(document.body) attach();
+    else document.addEventListener("DOMContentLoaded", attach);
+
+    // If parent told us to reopen after a navigation, show once loaded
+    window.addEventListener("message", function(e){
+      if(e.data && e.data.type === "uf_iframe_reopen") show();
+    });
+  })();
+
+  // Parent side: listen for uf_iframe_nav, update src, then tell new page to reopen popup
+  if(window === window.top){
+    window.addEventListener("message", function(e){
+      var d = e.data;
+      if(!d || typeof d !== "object" || d.type !== "uf_iframe_nav" || !d.url) return;
+      var frames = document.querySelectorAll("iframe");
+      for(var i=0; i<frames.length; i++){
+        try{
+          if(frames[i].contentWindow === e.source){
+            frames[i].src = d.url;
+            // After load, tell the new page to show the popup
+            frames[i].addEventListener("load", function(){
+              try{ frames[i].contentWindow.postMessage({ type:"uf_iframe_reopen" }, "*"); }catch(ex){}
+            }, { once:true });
+            return;
+          }
+        }catch(ex){}
+      }
+    });
+  }
+
   // ── Bookmarklet runner ────────────────────────────────────────────
   function runBookmarklet(text){
-    var t = (text||"").trim();
+    var t=(text||"").trim();
     if(!/^javascript:/i.test(t)) return false;
     try{ new Function(t.replace(/^javascript:/i,""))(); }
     catch(e){ alert("Bookmarklet error:\n"+e); }
@@ -259,7 +338,7 @@
   function getChiiFrame(){
     return [].slice.call(document.querySelectorAll("iframe[src]")).filter(function(f){
       try{
-        var u = new URL(HTMLElement.prototype.getAttribute.call(f,"src"));
+        var u=new URL(HTMLElement.prototype.getAttribute.call(f,"src"));
         return u.host==="chii.liriliri.io"&&u.pathname==="/front_end/chii_app.html";
       }catch(e){ return false; }
     })[0];
@@ -318,17 +397,17 @@
     document.title = "uFeatures";
     while(document.documentElement.firstChild)
       document.documentElement.removeChild(document.documentElement.firstChild);
-    var head = document.createElement("head");
-    var meta = document.createElement("meta"); meta.setAttribute("charset","utf-8"); head.appendChild(meta);
-    var vp = document.createElement("meta"); vp.name="viewport"; vp.content="width=device-width,initial-scale=1"; head.appendChild(vp);
-    var ti = document.createElement("title"); ti.textContent="uFeatures"; head.appendChild(ti);
-    var fav = document.createElement("link"); fav.rel="icon"; fav.type="image/png";
-    fav.href="https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
+    var head=document.createElement("head");
+    var meta=document.createElement("meta"); meta.setAttribute("charset","utf-8"); head.appendChild(meta);
+    var vp=document.createElement("meta"); vp.name="viewport"; vp.content="width=device-width,initial-scale=1"; head.appendChild(vp);
+    var ti=document.createElement("title"); ti.textContent="uFeatures"; head.appendChild(ti);
+    var fav=document.createElement("link"); fav.rel="icon"; fav.type="image/png";
+    fav.href="https://raw.githubusercontent.com/StudioCompile/uFeatures/main/Logo.png";
     head.appendChild(fav);
-    var style = document.createElement("style"); style.textContent = settingsCSS(); head.appendChild(style);
+    var style=document.createElement("style"); style.textContent=settingsCSS(); head.appendChild(style);
     document.documentElement.appendChild(head);
-    var body = document.createElement("body");
-    body.innerHTML = settingsHTML();
+    var body=document.createElement("body");
+    body.innerHTML=settingsHTML();
     document.documentElement.appendChild(body);
     wireSettings();
   }
@@ -336,139 +415,145 @@
   function settingsCSS(){
     return [
       "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
-      "html,body{height:100%;background:#f9f9fb;color:#1c1b22;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}",
+      "html,body{height:100%;background:#f5f5f5;color:#1c1b22;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:13px}",
       "#uf-wrap{display:flex;flex-direction:column;height:100vh;overflow:hidden}",
-      "#uf-top{display:flex;align-items:stretch;background:#fff;border-bottom:1px solid #c8c8cc;height:40px;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,.06)}",
-      ".uf-logo{display:flex;align-items:center;gap:8px;padding:0 16px;border-right:1px solid #c8c8cc;font-size:14px;font-weight:600;letter-spacing:-.2px;white-space:nowrap;color:#1c1b22}",
+      // Topbar
+      "#uf-top{display:flex;align-items:stretch;background:#fff;border-bottom:1px solid #d8d8d8;height:38px;flex-shrink:0}",
+      ".uf-logo{display:flex;align-items:center;gap:7px;padding:0 14px;border-right:1px solid #d8d8d8;font-size:13px;font-weight:600;color:#1c1b22;white-space:nowrap;cursor:pointer;text-decoration:none}",
+      ".uf-logo:hover{background:#f7f7f7}",
       ".uf-tabs{display:flex;align-items:stretch}",
-      ".uf-tab{display:flex;align-items:center;padding:0 16px;cursor:pointer;font-size:13px;color:#6f6e77;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .1s,border-color .1s;user-select:none}",
-      ".uf-tab:hover{color:#1c1b22;background:rgba(0,0,0,.03)}",
+      ".uf-tab{display:flex;align-items:center;padding:0 14px;cursor:pointer;font-size:13px;color:#6f6e77;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none}",
+      ".uf-tab:hover{background:#f7f7f7;color:#1c1b22}",
       ".uf-tab.on{color:#1c1b22;border-bottom-color:#7f0000}",
-      ".uf-top-actions{margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 12px}",
+      // Body
       "#uf-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}",
-      ".uf-scroll{flex:1;overflow-y:auto;padding:22px 28px 48px;scrollbar-width:thin;scrollbar-color:#c8c8cc transparent}",
+      ".uf-scroll{flex:1;overflow-y:auto;padding:18px 22px 36px}",
       ".uf-sec{display:none}.uf-sec.on{display:flex;flex-direction:column;flex:1;min-height:0}",
-      "#uf-bar{height:22px;background:#e0e0e4;display:flex;align-items:center;padding:0 12px;gap:20px;flex-shrink:0}",
-      "#uf-bar span{font-size:11px;color:#6f6e77}","#uf-bar b{color:#1c1b22;font-weight:400}",
-      "#uf-barst{margin-left:auto;font-size:11px;color:#6f6e77}",
-      // Buttons — fixed width so Edit and Delete are the same size
-      ".uf-btn{padding:5px 0;width:58px;text-align:center;border-radius:3px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #c8c8cc;background:#fff;color:#1c1b22;transition:background .1s,border-color .1s;flex-shrink:0}",
-      ".uf-btn:hover{background:#f0f0f4;border-color:#adadb1}",
-      ".uf-btn:disabled{opacity:.45;cursor:default;pointer-events:none}",
-      ".uf-btn.prim{background:#7f0000;border-color:#7f0000;color:#fff;width:auto;padding:5px 14px}",
-      ".uf-btn.prim:hover{background:#6a0000;border-color:#6a0000}",
-      ".uf-btn.danger{color:#cc0000;border-color:#c8c8cc;background:#fff}.uf-btn.danger:hover{background:#fff0f0;border-color:#cc0000}",
-      ".uf-btn.wide{width:auto;padding:5px 14px}", // for top-bar buttons
-      ".uf-sh{font-size:11px;font-weight:600;color:#6f6e77;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #c8c8cc}",
-      ".uf-card{background:#fff;border:1px solid #c8c8cc;border-radius:4px;overflow:hidden;margin-bottom:18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}",
-      ".uf-fa{padding:14px 16px;display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #e0e0e4}",
-      ".uf-g2{display:grid;grid-template-columns:1fr 1fr;gap:9px}",
+      // Status bar
+      "#uf-bar{height:20px;background:#e8e8e8;display:flex;align-items:center;padding:0 10px;gap:14px;flex-shrink:0;border-top:1px solid #d8d8d8}",
+      "#uf-bar span{font-size:11px;color:#6f6e77}",
+      "#uf-barst{margin-left:auto;font-size:11px}",
+      // Buttons
+      ".uf-btn{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;font-size:12px;font-family:inherit;cursor:pointer;border:1px solid #cfcfcf;background:#fff;color:#1c1b22;border-radius:3px}",
+      ".uf-btn:hover{background:#f0f0f0}",
+      ".uf-btn:disabled{opacity:.4;cursor:default;pointer-events:none}",
+      ".uf-btn.prim{background:#7f0000;border-color:#7f0000;color:#fff}",
+      ".uf-btn.prim:hover{background:#6a0000}",
+      ".uf-btn.danger{color:#7f0000;border-color:#cfcfcf}",
+      ".uf-btn.danger:hover{background:#fbecec;border-color:#7f0000}",
+      // Labels / inputs
       ".uf-lbl{font-size:11px;color:#6f6e77;margin-bottom:3px}",
-      "input.uf-in{border:1px solid #c8c8cc;border-radius:3px;padding:6px 9px;font-family:inherit;font-size:13px;outline:none;color:#1c1b22;background:#fff;width:100%;transition:border-color .12s}",
-      "input.uf-in:focus{border-color:#7f0000;box-shadow:0 0 0 1px rgba(127,0,0,.2)}",
-      "textarea.uf-ta{border:1px solid #c8c8cc;border-radius:3px;padding:7px 9px;font-family:Consolas,Menlo,monospace;font-size:12px;outline:none;color:#1c1b22;background:#fff;width:100%;resize:vertical;line-height:1.55;min-height:130px;transition:border-color .12s}",
-      "textarea.uf-ta:focus{border-color:#7f0000;box-shadow:0 0 0 1px rgba(127,0,0,.2)}",
-      ".uf-ff{display:flex;gap:8px;align-items:center}",
+      ".uf-sh{font-size:11px;font-weight:600;color:#6f6e77;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;padding-bottom:5px;border-bottom:1px solid #d8d8d8}",
+      ".uf-card{background:#fff;border:1px solid #d8d8d8;margin-bottom:14px;border-radius:4px;overflow:hidden}",
+      ".uf-fa{padding:12px 14px;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid #ececec}",
+      ".uf-g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}",
+      "input.uf-in{border:1px solid #cfcfcf;padding:5px 8px;font-family:inherit;font-size:13px;outline:none;width:100%;color:#1c1b22;background:#fff;border-radius:3px}",
+      "input.uf-in:focus{border-color:#7f0000}",
+      "textarea.uf-ta{border:1px solid #cfcfcf;padding:6px 8px;font-family:Consolas,Menlo,monospace;font-size:12px;outline:none;width:100%;resize:vertical;line-height:1.5;min-height:120px;color:#1c1b22;background:#fff;border-radius:3px}",
+      "textarea.uf-ta:focus{border-color:#7f0000}",
+      ".uf-ff{display:flex;gap:6px;align-items:center;padding:8px 14px;background:#f7f7f7;border-top:1px solid #ececec}",
       "#uf-st{flex:1;font-size:11px}",
-      // Script list rows: checkbox | info | push-status | edit | delete
-      ".uf-srow{display:grid;grid-template-columns:18px 1fr auto 58px 58px;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #e0e0e4}",
+      // Script rows — checkbox | info | push-st | edit | delete
+      ".uf-srow{display:grid;grid-template-columns:16px 1fr auto 50px 50px;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #ececec}",
       ".uf-srow:last-child{border-bottom:none}",
-      ".uf-srow:hover{background:#f9f9fb}",
+      ".uf-srow:hover{background:#fafafa}",
       ".uf-sinfo{min-width:0}",
       ".uf-sname{font-size:13px;color:#1c1b22;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-      ".uf-sname.dim{color:#adadb1}",
-      ".uf-sdomain{font-size:11px;color:#6f6e77}",
-      ".uf-empty{padding:28px;text-align:center;color:#adadb1}",
-      // Per-row push status
-      ".uf-push-st{font-size:10px;color:#adadb1;text-align:right;white-space:nowrap}",
-      // Checkbox
+      ".uf-sname.dim{color:#bbb}",
+      ".uf-sdomain{font-size:11px;color:#999}",
+      ".uf-push-st{font-size:10px;color:#bbb;text-align:right;white-space:nowrap}",
+      ".uf-empty{padding:24px;text-align:center;color:#bbb}",
+      // Checkbox — 16px, red when checked, bigger checkmark
       ".uf-cb{position:relative;width:16px;height:16px;flex-shrink:0;cursor:pointer}",
       ".uf-cb input{opacity:0;position:absolute;width:0;height:0}",
-      ".uf-cb .box{position:absolute;inset:0;border:1px solid #adadb1;border-radius:2px;background:#fff;transition:background .12s,border-color .12s}",
+      ".uf-cb .box{position:absolute;inset:0;border:1px solid #cfcfcf;background:#fff;border-radius:3px}",
       ".uf-cb input:checked+.box{background:#7f0000;border-color:#7f0000}",
-      ".uf-cb input:checked+.box::after{content:'';position:absolute;left:4px;top:1px;width:5px;height:9px;border:2px solid #fff;border-top:none;border-left:none;transform:rotate(45deg)}",
-      // Keys
-      ".uf-krow{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid #e0e0e4}",
+      ".uf-cb input:checked+.box::after{content:'';position:absolute;left:4px;top:1px;width:6px;height:9px;border:2px solid #fff;border-top:none;border-left:none;transform:rotate(45deg)}",
+      // Shortcuts
+      ".uf-krow{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #ececec}",
       ".uf-krow:last-child{border-bottom:none}",
-      ".uf-kbd{background:#f0f0f4;border:1px solid #c8c8cc;border-radius:3px;padding:3px 10px;font-family:monospace;font-size:12px;color:#1c1b22;min-width:170px;text-align:center}",
+      ".uf-kbd{background:#f0f0f0;border:1px solid #d8d8d8;padding:2px 8px;font-family:monospace;font-size:12px;min-width:160px;text-align:center;border-radius:3px}",
       ".uf-kdesc{font-size:12px;color:#6f6e77}",
-      "code.uf-c{background:#f0f0f4;padding:1px 4px;border-radius:2px;font-family:monospace;font-size:11px;color:#1c1b22}",
+      "code.uf-c{background:#f0f0f0;padding:1px 4px;font-family:monospace;font-size:11px;border-radius:2px}",
       // Home
-      ".uf-home-hero{display:flex;align-items:center;gap:16px;padding:24px 0 20px}",
-      ".uf-home-hero h1{font-size:22px;font-weight:300;color:#1c1b22;letter-spacing:-.3px}",
-      ".uf-home-hero h1 b{font-weight:700;color:#7f0000}",
-      ".uf-home-credit{font-size:11px;color:#adadb1;margin-top:2px}",
-      ".uf-feat-text p{font-size:13px;color:#3c3c43;line-height:1.7;margin-bottom:10px}",
-      ".uf-feat-text p:last-child{margin-bottom:0}",
+      ".uf-home-hero{display:flex;align-items:center;gap:14px;padding:18px 0 16px}",
+      ".uf-home-hero h1{font-size:20px;font-weight:600;color:#1c1b22}",
+      ".uf-home-credit{font-size:11px;color:#aaa;margin-top:3px}",
+      ".uf-home-desc{font-size:13px;color:#444;line-height:1.65;margin-bottom:16px}",
+      ".uf-feat-text p{font-size:13px;color:#444;line-height:1.7;margin-bottom:8px}",
       ".uf-feat-text p b{font-weight:600;color:#1c1b22}"
     ].join("\n");
   }
 
   function settingsHTML(){
-    var icon = "https://raw.githubusercontent.com/StudioCompile/Ublock-features/refs/heads/main/ufeatures.png";
+    var icon="https://raw.githubusercontent.com/StudioCompile/uFeatures/main/Logo.png";
     return '<div id="uf-wrap">'
       +'<div id="uf-top">'
-        +'<div class="uf-logo"><img src="'+icon+'" width="20" height="20" style="object-fit:contain">uFeatures</div>'
+        +'<a class="uf-logo" id="uf-home-link" href="https://www.google.com/ufeatures"><img src="'+icon+'" width="18" height="18" style="object-fit:contain;image-rendering:auto">uFeatures</a>'
         +'<div class="uf-tabs">'
           +'<div class="uf-tab on" data-tab="home">Home</div>'
-          +'<div class="uf-tab" data-tab="scripts">My Scripts</div>'
+          +'<div class="uf-tab" data-tab="scripts">Scripts</div>'
           +'<div class="uf-tab" data-tab="keys">Shortcuts</div>'
         +'</div>'
-        +'<div class="uf-top-actions">'
-          +'<button class="uf-btn wide" id="uf-update" title="Re-push all scripts to all tracked sites">&#8635; Update all sites</button>'
-        +'</div>'
       +'</div>'
+
       +'<div id="uf-body">'
 
         // HOME
         +'<div class="uf-sec on" id="uf-tab-home"><div class="uf-scroll">'
           +'<div class="uf-home-hero">'
-            +'<img src="'+icon+'" width="44" height="44" style="object-fit:contain;flex-shrink:0">'
-            +'<div><h1>u<b>Features</b></h1>'
-            +'<div class="uf-home-credit">By StudioCompile &mdash; Roblox: studiocompile &middot; Discord: @roblox_studio</div></div>'
+            +'<img src="'+icon+'" width="56" height="56" style="object-fit:contain;flex-shrink:0;image-rendering:auto">'
+            +'<div>'
+              +'<h1>uFeatures</h1>'
+              +'<div class="uf-home-credit">By StudioCompile &mdash; Roblox: studiocompile &middot; Discord: @roblox_studio</div>'
+            +'</div>'
           +'</div>'
+          +'<div class="uf-home-desc">uBlock Origin lets you inject JS into almost any website, which has a lot of potential. There are already projects out there for it, but you can only add one at a time and most aren\'t great. uFeatures is a great way to add all of these features &mdash; and easily add even more.</div>'
           +'<div class="uf-sh">Features</div>'
           +'<div class="uf-feat-text">'
-            +'<p><b>Script Manager</b> &mdash; Save JavaScript snippets that run automatically on specific sites every page load.</p>'
-            +'<p><b>Script Sync</b> &mdash; Scripts are pushed to target sites via a bridge tab that opens, saves, and closes automatically.</p>'
-            +'<p><b>Securly Blocker</b> &mdash; Removes Securly overlay elements and watches via MutationObserver so they stay gone.</p>'
+            +'<p><b>Script Manager</b> &mdash; Save JavaScript snippets that run automatically on specific sites every page load. Edit, toggle, or delete from My Scripts.</p>'
+            +'<p><b>Securly Blocker</b> &mdash; Removes Securly overlay elements on load and watches via MutationObserver so they cannot come back.</p>'
             +'<p><b>Chii Debugger</b> &mdash; Injects the Chii remote DevTools panel into any page. Ctrl+Shift+I to toggle.</p>'
-            +'<p><b>Bookmarklet Runner</b> &mdash; Copy any javascript: URL then press Ctrl+V outside a text field to run it.</p>'
+            +'<p><b>Bookmarklet Runner</b> &mdash; Copy any javascript: URL then press Ctrl+V outside a text field to run it on the current page.</p>'
+            +'<p><b>Iframe Navigator</b> &mdash; Hover the bottom-right corner of any iframe to navigate it to a new URL.</p>'
           +'</div>'
         +'</div></div>'
 
         // SCRIPTS
         +'<div class="uf-sec" id="uf-tab-scripts"><div class="uf-scroll">'
-          +'<div class="uf-sh">Add / Edit Script</div>'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+            +'<div class="uf-sh" style="margin-bottom:0;border-bottom:none;padding-bottom:0">Add / Edit Script</div>'
+            +'<button class="uf-btn" id="uf-update" style="font-size:11px">&#8635; Update all sites</button>'
+          +'</div>'
           +'<div class="uf-card"><div class="uf-fa">'
             +'<div class="uf-g2">'
-              +'<div><div class="uf-lbl">Script name</div><input id="uf-nameF" class="uf-in" type="text" value="Example Script"></div>'
-              +'<div><div class="uf-lbl">Target domain</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com or *.example.com/path"></div>'
+              +'<div><div class="uf-lbl">Script name</div><input id="uf-nameF" class="uf-in" type="text" value="My Script"></div>'
+              +'<div><div class="uf-lbl">Target domain (e.g. example.com)</div><input id="uf-domF" class="uf-in" type="text" placeholder="example.com"></div>'
             +'</div>'
             +'<div><div class="uf-lbl">JavaScript</div><textarea id="uf-codeF" class="uf-ta" placeholder="// Your script here..."></textarea></div>'
           +'</div>'
-          +'<div class="uf-ff" style="padding:10px 16px;background:#f0f0f4;border-top:1px solid #c8c8cc">'
+          +'<div class="uf-ff">'
             +'<span id="uf-st"></span>'
-            +'<button class="uf-btn wide" id="uf-cancelEdit" style="display:none">Cancel edit</button>'
-            +'<button class="uf-btn prim" id="uf-saveBtn">Save script</button>'
+            +'<button class="uf-btn" id="uf-cancelEdit" style="display:none">Cancel</button>'
+            +'<button class="uf-btn prim" id="uf-saveBtn">Save</button>'
           +'</div></div>'
-          +'<div class="uf-sh" style="margin-top:20px">Saved Scripts</div>'
+          +'<div class="uf-sh" style="margin-top:18px;margin-bottom:10px">Saved Scripts</div>'
           +'<div class="uf-card" id="uf-slist"></div>'
         +'</div></div>'
 
-        // KEYS
+        // SHORTCUTS
         +'<div class="uf-sec" id="uf-tab-keys"><div class="uf-scroll">'
-          +'<div class="uf-sh">Keyboard Shortcuts</div>'
+          +'<div class="uf-sh" style="margin-bottom:10px">Keyboard Shortcuts</div>'
           +'<div class="uf-card">'
-            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + `</span><span class="uf-kdesc">Open uFeatures settings in a new tab</span></div>'
+            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + `</span><span class="uf-kdesc">Open uFeatures in a new tab</span></div>'
             +'<div class="uf-krow"><span class="uf-kbd">Ctrl + Shift + I</span><span class="uf-kdesc">Toggle Chii remote debugger</span></div>'
-            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + V</span><span class="uf-kdesc">Run a <code class="uf-c">javascript:</code> bookmarklet from clipboard (outside text fields)</span></div>'
+            +'<div class="uf-krow"><span class="uf-kbd">Ctrl + V</span><span class="uf-kdesc">Run a <code class="uf-c">javascript:</code> URL from clipboard (outside a text field)</span></div>'
           +'</div>'
         +'</div></div>'
 
       +'</div>'
+
       +'<div id="uf-bar">'
-        +'<span>uFeatures &mdash; storage: <b>google.com</b></span>'
         +'<span id="uf-cnt-s">0 scripts</span>'
         +'<span id="uf-cnt-si">0 sites</span>'
         +'<span id="uf-barst"></span>'
@@ -482,7 +567,7 @@
   function setSt(msg, color){
     ["uf-st","uf-barst"].forEach(function(id){
       var el=document.getElementById(id); if(!el) return;
-      el.textContent=msg; el.style.color=color||"#8f8f9d";
+      el.textContent=msg; el.style.color=color||"#777";
     });
     if(msg) setTimeout(function(){
       ["uf-st","uf-barst"].forEach(function(id){
@@ -504,7 +589,7 @@
     var arr=siteLoad();
     if(!arr.length){
       var em=document.createElement("div"); em.className="uf-empty";
-      em.textContent="No scripts yet. Add one above."; c.appendChild(em); return;
+      em.textContent="No scripts yet."; c.appendChild(em); return;
     }
     arr.forEach(function(s,i){
       var row=document.createElement("div"); row.className="uf-srow";
@@ -518,10 +603,10 @@
       // Info
       var info=document.createElement("div"); info.className="uf-sinfo";
       var nm=document.createElement("div"); nm.className="uf-sname"+(s.enabled?"":" dim"); nm.textContent=s.name;
-      var dm=document.createElement("div"); dm.className="uf-sdomain"; dm.textContent=s.domain||"(no domain set)";
+      var dm=document.createElement("div"); dm.className="uf-sdomain"; dm.textContent=s.domain||"(no domain)";
       info.appendChild(nm); info.appendChild(dm);
 
-      // Push status (between info and buttons)
+      // Push status
       var pst=document.createElement("span"); pst.className="uf-push-st";
 
       cb.onchange=(function(idx,nmEl,pstEl){ return function(){
@@ -529,23 +614,24 @@
         cb.disabled=true;
         var a=siteLoad(); a[idx].enabled=checked; siteSave(a);
         nmEl.className="uf-sname"+(checked?"":" dim");
-        pstEl.textContent="pushing\u2026"; pstEl.style.color="#adadb1";
+        pstEl.textContent="pushing\u2026";
         pushForDomain(a[idx].domain, a, function(ok){
           cb.disabled=false;
-          pstEl.textContent=ok?"synced \u2713":"sync failed";
-          pstEl.style.color=ok?"#1e7e34":"#cc0000";
+          pstEl.textContent=ok?"synced \u2713":"failed";
+          pstEl.style.color=ok?"green":"#900";
           updateBar();
         });
       }; })(i,nm,pst);
 
       // Edit
       var eb=document.createElement("button"); eb.className="uf-btn"; eb.textContent="Edit";
+      eb.style.width="50px";
       eb.onclick=(function(sc){ return function(){
         _editingName=sc.name;
         document.getElementById("uf-nameF").value=sc.name;
         document.getElementById("uf-domF").value=sc.domain||"";
         document.getElementById("uf-codeF").value=sc.code;
-        document.getElementById("uf-saveBtn").textContent="Update script";
+        document.getElementById("uf-saveBtn").textContent="Update";
         document.getElementById("uf-cancelEdit").style.display="";
         document.querySelectorAll(".uf-tab").forEach(function(t){t.classList.remove("on");});
         document.querySelectorAll(".uf-sec").forEach(function(s){s.classList.remove("on");});
@@ -555,14 +641,15 @@
         document.getElementById("uf-nameF").focus();
       }; })(s);
 
-      // Delete — remove from list immediately (optimistic), push in background
+      // Delete — optimistic: remove locally immediately, push in background
       var db=document.createElement("button"); db.className="uf-btn danger"; db.textContent="Delete";
+      db.style.cssText="width:50px;text-align:center";
       db.onclick=(function(idx,name,domain){ return function(){
         if(!confirm("Delete \""+name+"\"?")) return;
         var a=siteLoad(); a.splice(idx,1); siteSave(a);
-        renderScripts(); updateBar(); // instant UI update
+        renderScripts(); updateBar();
         pushForDomain(domain, a, function(ok){
-          if(!ok) setSt("Deleted locally but push to remote failed","#cc0000");
+          if(!ok) setSt("Deleted locally; remote push failed","#900");
         });
       }; })(i,s.name,s.domain);
 
@@ -587,33 +674,30 @@
 
     document.getElementById("uf-cancelEdit").addEventListener("click",function(){
       _editingName=null;
-      document.getElementById("uf-nameF").value="Example Script";
+      document.getElementById("uf-nameF").value="My Script";
       document.getElementById("uf-domF").value=_referrer||"";
       document.getElementById("uf-codeF").value="";
-      document.getElementById("uf-saveBtn").textContent="Save script";
+      document.getElementById("uf-saveBtn").textContent="Save";
       document.getElementById("uf-cancelEdit").style.display="none";
       setSt("","");
     });
 
     document.getElementById("uf-saveBtn").addEventListener("click",function(){
-      var name=(document.getElementById("uf-nameF").value.trim())||"Example Script";
+      var name=(document.getElementById("uf-nameF").value.trim())||"My Script";
       var domain=document.getElementById("uf-domF").value.trim();
       var code=document.getElementById("uf-codeF").value.trim();
-      if(!code){ setSt("Code is required.","#cc0000"); return; }
+      if(!code){ setSt("Code is required.","#900"); return; }
 
-      var arr=siteLoad();
-      var idx=-1;
+      var arr=siteLoad(), idx=-1;
       if(_editingName) arr.forEach(function(s,i){ if(s.name===_editingName) idx=i; });
       var entry={name:name,domain:domain,code:code,enabled:true};
       if(idx>=0) arr[idx]=entry; else arr.push(entry);
       siteSave(arr);
 
       _editingName=null;
-      document.getElementById("uf-saveBtn").textContent="Save script";
+      document.getElementById("uf-saveBtn").textContent="Save";
       document.getElementById("uf-cancelEdit").style.display="none";
-
-      // Reset form
-      document.getElementById("uf-nameF").value="Example Script";
+      document.getElementById("uf-nameF").value="My Script";
       document.getElementById("uf-codeF").value="";
       document.getElementById("uf-domF").value=_referrer||"";
 
@@ -623,17 +707,16 @@
 
     document.getElementById("uf-update").addEventListener("click",function(){
       var sites=getSites(), scripts=siteLoad();
-      if(!sites.length){ setSt("No tracked sites.","#6f6e77"); return; }
+      if(!sites.length){ setSt("No tracked sites.","#777"); return; }
       var rem=sites.length, failed=0;
-      setSt("Updating "+rem+" site(s)\u2026","#6f6e77");
+      setSt("Updating "+rem+" site(s)\u2026","#777");
       sites.forEach(function(origin){
         var toSend=scripts.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
         pushToSite(origin,toSend,function(err){
-          rem--;
-          if(err) failed++;
+          rem--; if(err) failed++;
           if(rem<=0){
-            if(failed===0) setSt("All sites updated \u2713","#1e7e34");
-            else setSt(failed+" site(s) failed to update","#cc0000");
+            if(failed===0) setSt("All updated \u2713","green");
+            else setSt(failed+" failed","#900");
           }
         });
       });
@@ -643,40 +726,33 @@
   }
 
   // ── pushForDomain ─────────────────────────────────────────────────
-  // Strips www. from both sides when matching known origins so that
-  // example.com and www.example.com are always treated as the same site.
-  function stripWww(host){ return host.replace(/^www\./,""); }
-
   function pushForDomain(domain, arr, cb){
     if(!domain){
-      setSt("Saved (no domain \u2014 not pushed to any site)","#6f6e77");
+      setSt("Saved (no domain \u2014 not pushed)","#777");
       if(cb) cb(false); return;
     }
-    var raw=domain.split(",")[0].trim().replace(/^\*\./,"");
+    var raw=stripWww(domain.split(",")[0].trim().replace(/^\*\./,""));
     var sl=raw.indexOf("/"); if(sl!==-1) raw=raw.slice(0,sl);
-    raw=stripWww(raw);
-    if(!raw){ setSt("Saved","#6f6e77"); if(cb) cb(false); return; }
+    if(!raw){ setSt("Saved","#777"); if(cb) cb(false); return; }
 
-    // Match stored origins by comparing stripped hostnames
+    // Find tracked origins matching this domain (www-insensitive)
     var known=getSites().filter(function(o){
-      try{ return stripWww(new URL(o).hostname).indexOf(raw)!==-1; }catch(e){ return false; }
+      try{ return stripWww(new URL(o).hostname)===raw; }catch(e){ return false; }
     });
-
-    // If no tracked origin yet, try both www and non-www so we find the right one
-    var origins=known.length ? known : ["https://"+raw, "https://www."+raw];
+    // First time: open one tab without www — window.name survives any redirect
+    var origins=known.length ? known : ["https://"+raw];
 
     var rem=origins.length, failed=0, anyOk=false;
-    setSt("Pushing to "+raw+"\u2026","#6f6e77");
-
+    setSt("Pushing to "+raw+"\u2026","#777");
     origins.forEach(function(origin){
       var toSend=arr.filter(function(s){ return !s.domain||domainMatchesOrigin(s.domain,origin); });
       pushToSite(origin, toSend, function(err){
         rem--;
-        if(err){ failed++; }
+        if(err) failed++;
         else{ anyOk=true; addSite(origin); updateBar(); }
         if(rem<=0){
-          if(anyOk){ setSt("Saved \u2713","#1e7e34"); if(cb) cb(true); }
-          else{ setSt("Saved locally, push to "+raw+" failed","#cc0000"); if(cb) cb(false); }
+          if(anyOk){ setSt("Saved \u2713","green"); if(cb) cb(true); }
+          else{ setSt("Saved locally; push failed","#900"); if(cb) cb(false); }
         }
       });
     });
