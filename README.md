@@ -1,8 +1,7 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/StudioCompile/uFeatures/refs/heads/main/Logo.png" alt="uFeatures Logo" width="48" />
-</p>
-
-# uFeatures
+<h1>
+  <img src="https://raw.githubusercontent.com/StudioCompile/uFeatures/refs/heads/main/Logo.png" alt="uFeatures Logo" width="24" style="vertical-align: middle; margin-right:8px;" />
+  uFeatures
+</h1>
 
 uFeatures is a small toolkit that injects useful client-side features into pages via content-filtering extensions (uBlock Origin or AdGuard). It provides a script manager, an injected DevTools panel, a bookmarklet runner, and other utilities to make web development and browsing more powerful.
 
