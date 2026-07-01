@@ -20,13 +20,13 @@ https://studiocompile.github.io/uFeatures/uBlock.js
 ```
 
 ### AdGuard (custom filter)
-1. Open AdGuard → Filters → Custom filters → add by URL.
-2. Add this URL:
+1. Enable UserScripts in chrome://extensions on the AdGuard page.
+2. Open AdGuard → Filters → Custom filters → add by URL.
+3. Add this URL:
 
 ```
 https://studiocompile.github.io/uFeatures/AdGaurd.txt
 ```
-####You may need to follow the instructions to enable UserScripts
 ## Features
 - Script Manager — Save JavaScript snippets that run automatically on specific sites every page load.
 - Remove Securly Loading — removes the annoying Securly loading overlay.
