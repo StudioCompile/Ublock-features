@@ -3,14 +3,13 @@
   uFeatures
 </h1>
 
-uFeatures is a small toolkit that injects useful client-side features into pages via content-filtering extensions (uBlock Origin or AdGuard). It provides a script manager, an injected DevTools panel, a bookmarklet runner, and other utilities to make web development and browsing more powerful.
-
+uFeatures is a powerful tool that uses script injection from ad blockers (uBlock Origin or AdGuard). It provides a script manager, DevTools panel, a bookmarklet runner, and other utilities to enhance your Chromebook experience.
 ## Installation
 
 ### uBlock Origin
 1. Open uBlock Origin's dashboard (click the uBlock icon → the gear icon).
-2. Go to the "Settings" tab and enable "I am an advanced user" if it's not already enabled.
-3. Scroll to the "Advanced settings" section and set `userResourcesLocation` to:
+2. Go to the "Settings" tab and click the gear icon after enabling "I am an advanced user".
+3. Scroll down to the last section and set `userResourcesLocation` to:
 
 ```
 https://studiocompile.github.io/uFeatures/uBlock.js
@@ -23,8 +22,9 @@ https://studiocompile.github.io/uFeatures/uBlock.js
 ```
 
 ### AdGuard (custom filter)
-1. Open AdGuard → Filters → Custom filters → add by URL.
-2. Add this URL:
+1. Enable UserScripts in chrome://extensions on the AdGuard page.
+2. Open AdGuard → Filters → Custom filters → add by URL.
+3. Add this URL:
 
 ```
 https://studiocompile.github.io/uFeatures/AdGaurd.txt
