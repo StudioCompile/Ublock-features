@@ -3,7 +3,7 @@
   uFeatures
 </h1>
 
-uFeatures is a powerful tool that uses script injection from ad blockers (uBlock Origin or AdGuard). It provides a script manager, DevTools panel, a bookmarklet runner, and other utilities to enhance your Chromebook experience.
+uFeatures is a powerful tool that uses script injection from ad blockers (uBlock Origin or AdGuard). It provides custom UserScripts, DevTools panel, bookmarklets, and other utilities to enhance your Chromebook experience.
 ## Installation
 
 ### uBlock Origin
