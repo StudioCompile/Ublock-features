@@ -1,4 +1,6 @@
-![uFeatures Logo](https://raw.githubusercontent.com/StudioCompile/uFeatures/refs/heads/main/Logo.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/StudioCompile/uFeatures/refs/heads/main/Logo.png" alt="uFeatures Logo" width="48" />
+</p>
 
 # uFeatures
 
