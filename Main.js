@@ -1,16 +1,3 @@
-/// uFeatures.js
-// Inject on every site via a userscript manager (Violentmonkey / Tampermonkey).
-//
-// HOW IT WORKS:
-//   1. Visit google.com/ufeatures  →  page is taken over, shows the full settings UI.
-//   2. Scripts are saved in google.com localStorage (the master list).
-//   3. When you save/edit/delete/toggle a script, it ALSO pushes to the target
-//      site's own localStorage via a quick hidden bridge window (open → set → close).
-//   4. On EVERY other page load, uFeatures reads THAT site's localStorage and
-//      runs matching scripts. No persistent tab, no bridge needed at runtime.
-//   5. Ctrl+`  →  opens google.com/ufeatures settings in a new tab.
-//   6. Ctrl+Shift+I  →  Chii remote debugger.
-
 !function(){
 
   var SITE_KEY  = "__uFeaturesScripts";
@@ -167,8 +154,37 @@
                 || (window.name && window.name.indexOf("uf_bridge_") === 0);
     if(!isBridge || IS_SETTINGS) return;
 
+    // We only need OUR script to run on this tab — the actual page content and
+    // its scripts are irrelevant and can only get in the way (slow us down,
+    // trigger CSP noise, etc). window.stop() halts the parser immediately:
+    // it cancels any scripts/resources still queued to load or run, same as
+    // hitting the browser's stop button. Whatever already ran before this line
+    // executed still ran (we can't undo that), but nothing further will.
+    try{ window.stop(); }catch(ex){}
+
+    // Remove any <script> tags already sitting in the DOM so they can't be
+    // re-triggered or read by anything else, and strip any that get added
+    // afterward (e.g. by an inline handler that fired before window.stop()).
+    function stripScripts(){
+      var scripts = document.querySelectorAll("script");
+      for(var i=0;i<scripts.length;i++){
+        try{ scripts[i].remove(); }catch(ex){}
+      }
+    }
+    stripScripts();
+    new MutationObserver(function(muts){
+      for(var i=0;i<muts.length;i++){
+        var added = muts[i].addedNodes;
+        for(var j=0;j<added.length;j++){
+          var n = added[j];
+          if(n.tagName === "SCRIPT"){ try{ n.remove(); }catch(ex){} }
+        }
+      }
+    }).observe(document.documentElement || document, { childList:true, subtree:true });
+
     function showOverlay(){
       if(document.getElementById("__uf_bridge_overlay")) return;
+      stripScripts();
       var s = document.createElement("style");
       s.textContent = "html,body{background:#fff!important;overflow:hidden!important;margin:0!important;padding:0!important}body>*:not(#__uf_bridge_overlay){display:none!important}";
       (document.head||document.documentElement).appendChild(s);
@@ -191,9 +207,11 @@
       es.textContent = "html,body{background:#fff!important;overflow:hidden!important}body>*{display:none!important}";
       (document.head||document.documentElement).appendChild(es);
       document.addEventListener("DOMContentLoaded", showOverlay);
-    } else {
-      showOverlay();
     }
+    // Call immediately regardless of readyState — window.stop() can prevent
+    // DOMContentLoaded from ever firing, so we can't rely on it alone.
+    // showOverlay() guards against running twice.
+    showOverlay();
   })();
 
   // ── Securly blocker ───────────────────────────────────────────────
@@ -295,11 +313,11 @@
     ].join(";");
 
     var btnGo = document.createElement("button");
-    btnGo.textContent = "\u2192";
+    btnGo.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="12" x2="20" y2="12"></line><polyline points="13 5 20 12 13 19"></polyline></svg>';
     btnGo.style.cssText = [
       "width:28px;height:28px;padding:0",
       "display:flex;align-items:center;justify-content:center",
-      "font-size:14px;font-family:inherit;line-height:1",
+      "font-family:inherit;line-height:1",
       "cursor:pointer;border:none;border-left:1px solid #cfcfcf",
       "background:#7f0000;color:#fff;outline:none;flex-shrink:0"
     ].join(";");
